@@ -97,14 +97,61 @@ def test_settings_require_a_long_token(tmp_path: Path) -> None:
     assert settings.jobfinder_dir == (tmp_path / ".." / "jf").resolve()
 
 
-def _client() -> TestClient:
-    item = InboxItem("greenhouse:acme:1", "Software Engineer Intern", "Acme", "Tel Aviv", 95, "https://example.test/1")
+KEY = "greenhouse:acme:1"
+
+
+def _client(saved: list[tuple[str, str]] | None = None) -> TestClient:
+    item = InboxItem(KEY, "Software Engineer Intern", "Acme", "Tel Aviv", 95, "https://example.test/1")
+
+    def sink(key: str, name: str) -> bool:
+        if key != KEY:
+            return False
+        if saved is not None:
+            saved.append((key, name))
+        return True
+
     app = create_app(
         TOKEN,
         lambda: status.Status([status.Check("Desktop (Brain)", True, "online")], None, 10),
         lambda: [item],
+        sink,
     )
     return TestClient(app)
+
+
+def test_answer_is_passed_on_and_checked() -> None:
+    saved: list[tuple[str, str]] = []
+    client = _client(saved)
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+    assert client.post("/api/inbox/answer", json={"key": KEY, "answer": "applied"}).status_code == 401
+    assert client.post("/api/inbox/answer", json={"key": KEY, "answer": "applied"}, headers=auth).json() == {"saved": True}
+    assert client.post("/api/inbox/answer", json={"key": KEY, "answer": "maybe"}, headers=auth).status_code == 400
+    assert client.post("/api/inbox/answer", json={"key": "x:y:z", "answer": "later"}, headers=auth).status_code == 404
+    assert saved == [(KEY, "applied")]
+
+
+def test_inbox_answer_writes_to_jobfinder(tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+
+    from jobfinder.labels import load_labels
+    from jobfinder.models import Job
+    from jobfinder.storage import JobStore
+
+    from jarvis.brain import inbox
+
+    (tmp_path / "data").mkdir()
+    assert not inbox.answer(tmp_path, KEY, "applied")  # no database yet
+    job = Job(source="greenhouse", slug="acme", job_id="1", company="Acme", title="Intern", location="Tel Aviv",
+              url="https://example.test/1", description_text="About.")
+    store = JobStore.open(tmp_path / "data" / "jobs.db")
+    store.record_board("greenhouse", "acme", [job], datetime.now(UTC))
+    store.close()
+    assert inbox.answer(tmp_path, job.key, "not_relevant")
+    assert not inbox.answer(tmp_path, "greenhouse:acme:404", "applied")
+    store = JobStore.open(tmp_path / "data" / "jobs.db")
+    assert store.digest_answers() == {job.key: "not_relevant"}
+    store.close()
+    assert load_labels(tmp_path / "data" / "labels.jsonl")[job.key].reason == "Not relevant (Jarvis)"
 
 
 def test_api_needs_the_token() -> None:

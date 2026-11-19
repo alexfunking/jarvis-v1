@@ -87,7 +87,8 @@
   .item { border-left: 2px solid var(--amber); padding: 6px 10px; background: var(--amber-faint); }
   .item .t { font-size: 16px; color: var(--amber-hot); }
   .item .s { font-size: 13px; color: var(--muted); font-family: var(--mono); }
-  .actions { display: flex; gap: 6px; margin-top: 6px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .btn:disabled { opacity: 0.4; cursor: wait; }
   .btn { font-family: var(--mono); font-size: 12px; color: var(--amber); background: transparent;
          border: 1px solid var(--line); padding: 3px 9px; cursor: pointer; }
   .btn:hover { background: var(--amber); color: var(--bg); }
@@ -396,8 +397,11 @@
   const setToken = (v) => { try { localStorage.setItem(TOKEN_KEY, v); } catch {} };
   let greeted = false;
 
-  async function api(path) {
-    const response = await fetch(path, { headers: { Authorization: "Bearer " + getToken() } });
+  async function api(path, body) {
+    const headers = { Authorization: "Bearer " + getToken() };
+    const init = body === undefined ? { headers } :
+      { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) };
+    const response = await fetch(path, init);
     if (response.status === 401) { gate.classList.add("open"); throw new Error("unauthorized"); }
     if (!response.ok) throw new Error("HTTP " + response.status);
     return response.json();
@@ -444,10 +448,35 @@
       new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
   }
 
+  // The same three answers as the Telegram digest's buttons.
+  const ANSWERS = [
+    ["applied", "APPLIED", "Marked as applied."],
+    ["not_relevant", "NOT RELEVANT", "Marked as not relevant."],
+    ["later", "LATER", "It will come back in the next digest."],
+  ];
+
+  function setInboxCount() {
+    const n = document.querySelectorAll("#inbox .item").length;
+    document.getElementById("inbox-count").textContent = n ? n + " WAITING" : "";
+    if (!n) document.getElementById("inbox").replaceChildren(el("div", "empty", "Nothing waiting."));
+  }
+
+  async function answerJob(it, name, done, item) {
+    item.querySelectorAll("button").forEach(b => { b.disabled = true; });
+    try {
+      await api("/api/inbox/answer", { key: it.key, answer: name });
+      item.remove();
+      setInboxCount();
+      say("ai", `${it.title} at ${it.company}: ${done}`);
+    } catch (err) {
+      item.querySelectorAll("button").forEach(b => { b.disabled = false; });
+      if (err.message !== "unauthorized") say("ai", `I couldn't save that answer (${err.message}).`);
+    }
+  }
+
   function renderInbox(items) {
     const box = document.getElementById("inbox");
-    document.getElementById("inbox-count").textContent = items.length ? items.length + " WAITING" : "";
-    if (!items.length) { box.replaceChildren(el("div", "empty", "Nothing waiting.")); return; }
+    if (!items.length) { box.replaceChildren(); setInboxCount(); return; }
     box.replaceChildren(...items.map(it => {
       const item = el("div", "item");
       item.append(el("div", "t", it.title), el("div", "s", `${it.company} · ${it.location} · ${it.points} pts`));
@@ -456,9 +485,16 @@
       if (/^https?:\/\//.test(it.url)) open.href = it.url;
       open.target = "_blank"; open.rel = "noopener noreferrer";
       actions.appendChild(open);
+      for (const [name, label, done] of ANSWERS) {
+        const b = el("button", "btn", label);
+        b.type = "button";
+        b.addEventListener("click", () => answerJob(it, name, done, item));
+        actions.appendChild(b);
+      }
       item.appendChild(actions);
       return item;
     }));
+    setInboxCount();
   }
 
   async function refresh() {

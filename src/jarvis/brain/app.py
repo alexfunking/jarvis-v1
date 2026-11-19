@@ -15,6 +15,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from jarvis.brain import inbox, status
 from jarvis.brain.config import ConfigError, Settings
@@ -24,6 +25,12 @@ WEB_INDEX = ROOT / "web" / "index.html"
 
 StatusSource = Callable[[], status.Status]
 InboxSource = Callable[[], list[inbox.InboxItem]]
+AnswerSink = Callable[[str, str], bool]  # (job key, answer name) -> saved
+
+
+class AnswerRequest(BaseModel):
+    key: str
+    answer: str
 
 
 def live_status(settings: Settings) -> StatusSource:
@@ -56,7 +63,7 @@ def _open_jobs(jobfinder_dir: Path) -> int | None:
         store.close()
 
 
-def create_app(token: str, status_source: StatusSource, inbox_source: InboxSource) -> FastAPI:
+def create_app(token: str, status_source: StatusSource, inbox_source: InboxSource, answer_sink: AnswerSink) -> FastAPI:
     app = FastAPI(title="Jarvis Brain", docs_url=None, redoc_url=None, openapi_url=None)
 
     def require_token(authorization: Annotated[str | None, Header()] = None) -> None:
@@ -76,6 +83,14 @@ def create_app(token: str, status_source: StatusSource, inbox_source: InboxSourc
     def get_inbox() -> list[dict[str, object]]:
         return inbox.to_json(inbox_source())
 
+    @app.post("/api/inbox/answer", dependencies=[Depends(require_token)])
+    def post_answer(request: AnswerRequest) -> dict[str, bool]:
+        if request.answer not in inbox.ANSWER_NAMES:
+            raise HTTPException(status_code=400, detail=f"answer must be one of {sorted(inbox.ANSWER_NAMES)}")
+        if not answer_sink(request.key, request.answer):
+            raise HTTPException(status_code=404, detail="no such job")
+        return {"saved": True}
+
     return app
 
 
@@ -91,6 +106,7 @@ def main() -> int:
         settings.token,
         live_status(settings),
         lambda: inbox.job_matches(settings.jobfinder_dir),
+        lambda key, name: inbox.answer(settings.jobfinder_dir, key, name),
     )
     print(f"Jarvis Brain on http://{settings.host}:{settings.port}/")
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="warning")
