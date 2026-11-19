@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jarvis</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #050302;
+    --amber: #ffad3b;
+    --amber-hot: #ffd27a;
+    --amber-dim: #8a5414;
+    --amber-faint: rgba(255, 173, 59, 0.14);
+    --line: rgba(255, 173, 59, 0.38);
+    --text: #f3d9b1;
+    --muted: #a07a4c;
+    --ok: #ffc65c;
+    --warn: #ff6a2b;
+    --mono: "Share Tech Mono", ui-monospace, Consolas, monospace;
+    --ui: "Rajdhani", "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: radial-gradient(ellipse at 50% 45%, #140b04 0%, var(--bg) 62%);
+    color: var(--text);
+    font-family: var(--ui);
+    overflow: hidden;
+    letter-spacing: 0.04em;
+  }
+
+  /* Layout */
+  .hud {
+    position: relative;
+    height: 100vh;
+    display: grid;
+    grid-template-columns: minmax(220px, 290px) 1fr minmax(220px, 290px);
+    grid-template-rows: 64px 1fr 92px;
+    gap: 14px;
+    padding: 18px 22px;
+  }
+  #orb { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; }
+  .hud > *:not(#orb):not(.corner):not(.ticks) { position: relative; z-index: 1; }
+
+  /* Top bar */
+  .topbar {
+    grid-column: 1 / -1;
+    display: flex; align-items: center; gap: 18px;
+    border-bottom: 1px solid var(--line);
+    padding: 0 6px;
+  }
+  .brand { font-family: var(--mono); font-size: 26px; color: var(--amber-hot); letter-spacing: 0.42em;
+           text-shadow: 0 0 12px rgba(255, 173, 59, 0.75); }
+  .bar { flex: 1; height: 6px; background: linear-gradient(90deg, var(--amber-dim), transparent 70%);
+         position: relative; }
+  .bar::after { content: ""; position: absolute; right: 18%; top: -4px; width: 64px; height: 14px;
+                border: 1px solid var(--line); }
+  .clock { font-family: var(--mono); font-size: 20px; color: var(--amber); }
+  .state { font-family: var(--mono); font-size: 13px; padding: 4px 10px; border: 1px solid var(--line);
+           color: var(--amber-hot); text-transform: uppercase; }
+  .state.thinking { color: var(--bg); background: var(--amber); }
+
+  /* Side panels */
+  .panel {
+    border: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(30, 16, 4, 0.72), rgba(8, 4, 1, 0.55));
+    padding: 14px 16px; overflow-y: auto;
+    clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 16px 100%, 0 calc(100% - 16px));
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .panel h2 { margin: 0; font-family: var(--mono); font-weight: 400; font-size: 13px; color: var(--muted);
+              letter-spacing: 0.3em; display: flex; justify-content: space-between; }
+  .panel h2 .tag { color: var(--amber-dim); letter-spacing: 0.1em; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+         border-bottom: 1px dashed rgba(255, 173, 59, 0.16); padding: 6px 0; font-size: 16px; }
+  .row .k { color: var(--muted); }
+  .row .v { font-family: var(--mono); color: var(--amber-hot); text-align: right; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok);
+         box-shadow: 0 0 8px var(--ok); margin-right: 6px; vertical-align: middle; }
+  .dot.off { background: #4a2a0c; box-shadow: none; }
+  .dot.warn { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+  .meter { height: 5px; background: rgba(255, 173, 59, 0.12); position: relative; margin-top: 2px; }
+  .meter > i { position: absolute; inset: 0 auto 0 0; background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+
+  .item { border-left: 2px solid var(--amber); padding: 6px 10px; background: var(--amber-faint); }
+  .item .t { font-size: 16px; color: var(--amber-hot); }
+  .item .s { font-size: 13px; color: var(--muted); font-family: var(--mono); }
+  .actions { display: flex; gap: 6px; margin-top: 6px; }
+  .btn { font-family: var(--mono); font-size: 12px; color: var(--amber); background: transparent;
+         border: 1px solid var(--line); padding: 3px 9px; cursor: pointer; }
+  .btn:hover { background: var(--amber); color: var(--bg); }
+  a.btn { text-decoration: none; display: inline-block; }
+  .empty { color: var(--muted); font-size: 15px; padding: 6px 0; }
+  .phase-active .v { color: var(--bg); background: var(--amber); padding: 0 6px; }
+  .phase-done .k, .phase-done .v { color: var(--amber-dim); }
+
+  /* Token prompt */
+  .gate { position: fixed; inset: 0; z-index: 10; display: none; place-items: center;
+          background: rgba(5, 3, 2, 0.86); }
+  .gate.open { display: grid; }
+  .gate form { border: 1px solid var(--amber); padding: 24px; width: min(420px, 92vw);
+               background: #0c0703; display: flex; flex-direction: column; gap: 12px; }
+  .gate h3 { margin: 0; font-family: var(--mono); font-weight: 400; color: var(--amber-hot); letter-spacing: 0.3em; }
+  .gate p { margin: 0; color: var(--muted); font-size: 15px; }
+  .gate input { height: 44px; background: #140a02; border: 1px solid var(--line); color: var(--amber-hot);
+                font-family: var(--mono); font-size: 15px; padding: 0 12px; outline: none; }
+
+  /* Center stack: the orb shows through; only the log sits low in it */
+  .center { display: flex; flex-direction: column; justify-content: flex-end; pointer-events: none; }
+  .log { max-height: 30%; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;
+         pointer-events: auto; margin: 0 6%; padding: 10px 14px;
+         background: linear-gradient(180deg, rgba(5, 3, 2, 0), rgba(5, 3, 2, 0.82) 35%);
+         mask-image: linear-gradient(transparent, #000 25%); }
+  .msg { font-size: 17px; line-height: 1.35; unicode-bidi: plaintext; }
+  .msg.me { color: var(--muted); }
+  .msg.me::before { content: "› "; color: var(--amber-dim); }
+  .msg.ai { color: var(--amber-hot); text-shadow: 0 0 10px rgba(255, 173, 59, 0.35); }
+
+  /* Command bar */
+  .command {
+    grid-column: 1 / -1;
+    display: flex; align-items: center; gap: 14px;
+    border-top: 1px solid var(--line);
+    padding-top: 14px;
+  }
+  .command .ring { width: 54px; height: 54px; border-radius: 50%; border: 1px solid var(--line);
+                   display: grid; place-items: center; flex: none; }
+  .command .ring::after { content: ""; width: 18px; height: 18px; border-radius: 50%;
+                          border: 2px solid var(--amber); box-shadow: 0 0 12px var(--amber); }
+  .command input {
+    flex: 1; height: 54px; background: rgba(20, 10, 2, 0.8); border: 1px solid var(--line);
+    color: var(--amber-hot); font-family: var(--ui); font-size: 20px; padding: 0 18px; outline: none;
+    letter-spacing: 0.03em; unicode-bidi: plaintext;
+  }
+  .command input:focus { border-color: var(--amber); box-shadow: 0 0 18px rgba(255, 173, 59, 0.25) inset; }
+  .command input::placeholder { color: var(--amber-dim); }
+  .send { height: 54px; padding: 0 22px; font-size: 15px; }
+
+  /* Frame decorations */
+  .corner { position: absolute; width: 28px; height: 28px; border: 2px solid var(--amber); z-index: 2;
+            filter: drop-shadow(0 0 4px var(--amber)); pointer-events: none; }
+  .corner.tl { top: 8px; left: 8px; border-right: none; border-bottom: none; }
+  .corner.tr { top: 8px; right: 8px; border-left: none; border-bottom: none; }
+  .corner.bl { bottom: 8px; left: 8px; border-right: none; border-top: none; }
+  .corner.br { bottom: 8px; right: 8px; border-left: none; border-top: none; }
+  .ticks { position: absolute; right: 4px; top: 22%; bottom: 22%; width: 10px; z-index: 0;
+           background: repeating-linear-gradient(180deg, var(--line) 0 1px, transparent 1px 14px); }
+  .ticks.l { left: 4px; right: auto; }
+
+  @media (max-width: 860px) {
+    body { overflow: auto; }
+    .hud { grid-template-columns: minmax(0, 1fr); grid-template-rows: 56px 46vh auto auto 80px; height: auto;
+           min-height: 100vh; padding: 12px 16px; }
+    .topbar { gap: 10px; }
+    .bar { display: none; }
+    .brand { flex: 1; }
+    .clock { font-size: 16px; }
+    .panel { clip-path: none; }
+    .center { grid-row: 2; }
+    .panel.left { grid-row: 3; }
+    .panel.right { grid-row: 4; }
+    .command { grid-row: 5; }
+    #orb { position: absolute; height: calc(46vh + 70px); }
+    .brand { font-size: 20px; letter-spacing: 0.3em; }
+    .ticks { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="hud" id="hud">
+  <canvas id="orb" aria-hidden="true"></canvas>
+  <span class="corner tl"></span><span class="corner tr"></span>
+  <span class="corner bl"></span><span class="corner br"></span>
+  <span class="ticks l"></span><span class="ticks"></span>
+
+  <header class="topbar">
+    <div class="brand">JARVIS</div>
+    <div class="bar"></div>
+    <div class="state" id="state">idle</div>
+    <div class="clock" id="clock">--:--:--</div>
+  </header>
+
+  <section class="panel left">
+    <h2>SYSTEMS <span class="tag" id="updated"></span></h2>
+    <div id="checks"><div class="row"><span class="k">Connecting…</span></div></div>
+    <h2 style="margin-top:8px">JOB FINDER</h2>
+    <div id="jobfinder"></div>
+  </section>
+
+  <section class="center">
+    <div class="log" id="log"></div>
+  </section>
+
+  <section class="panel right">
+    <h2>DECISION INBOX <span class="tag" id="inbox-count"></span></h2>
+    <div id="inbox"></div>
+    <h2 style="margin-top:8px">ROADMAP</h2>
+    <div id="roadmap"></div>
+  </section>
+
+  <form class="command" id="command" autocomplete="off">
+    <div class="ring" aria-hidden="true"></div>
+    <input id="input" placeholder="Ask Jarvis…" aria-label="Ask Jarvis" dir="auto">
+    <button class="btn send" type="submit">SEND</button>
+  </form>
+</div>
+
+<div class="gate" id="gate">
+  <form id="gate-form" autocomplete="off">
+    <h3>ACCESS</h3>
+    <p>Paste the JARVIS_TOKEN from the desktop's .env. It stays in this browser only.</p>
+    <input id="gate-token" type="password" aria-label="Access token">
+    <button class="btn send" type="submit">UNLOCK</button>
+  </form>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("orb");
+  const ctx = canvas.getContext("2d");
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let W = 0, H = 0, DPR = 1, R = 0, CX = 0, CY = 0;
+
+  // One soft glow sprite, drawn many times: much cheaper than shadowBlur per particle.
+  const sprite = document.createElement("canvas");
+  sprite.width = sprite.height = 64;
+  {
+    const s = sprite.getContext("2d");
+    const g = s.createRadialGradient(32, 32, 0, 32, 32, 32);
+    g.addColorStop(0, "rgba(255,236,190,1)");
+    g.addColorStop(0.18, "rgba(255,190,90,0.85)");
+    g.addColorStop(0.45, "rgba(255,140,30,0.28)");
+    g.addColorStop(1, "rgba(255,120,20,0)");
+    s.fillStyle = g;
+    s.fillRect(0, 0, 64, 64);
+  }
+
+  // Particles live on a few noisy spherical shells; some are drawn as short streaks.
+  const N = 4200;
+  const parts = [];
+  for (let i = 0; i < N; i++) {
+    const u = Math.random() * 2 - 1;
+    const a = Math.random() * Math.PI * 2;
+    const outer = Math.random() < 0.8;
+    const shell = outer ? 0.9 + Math.random() * 0.14 : 0.3 + Math.random() * 0.5;
+    const s = Math.sqrt(1 - u * u);
+    parts.push({
+      x: s * Math.cos(a) * shell, y: u * shell, z: s * Math.sin(a) * shell,
+      size: Math.random() < 0.06 ? 2.4 + Math.random() * 2.5 : 0.6 + Math.random() * 1.3,
+      outer,
+      streak: Math.random() < 0.4 ? 0.03 + Math.random() * 0.12 : 0,
+      flicker: Math.random() * Math.PI * 2,
+      b: 0.35 + Math.random() * 0.65,
+    });
+  }
+
+  // Broken outer ring: arcs with tick marks, counter-rotating.
+  const arcs = [];
+  for (let i = 0, angle = 0; angle < Math.PI * 2 - 0.2; i++) {
+    const len = 0.15 + Math.random() * 0.6;
+    arcs.push({ start: angle, len, r: 1.18 + Math.random() * 0.08, w: Math.random() < 0.3 ? 3 : 1 });
+    angle += len + 0.05 + Math.random() * 0.25;
+  }
+
+  let state = "idle";
+  let energy = 0.35, energyTarget = 0.35;
+  window.jarvisState = (next) => {
+    state = next;
+    energyTarget = next === "thinking" ? 1 : next === "speaking" ? 0.7 : 0.35;
+    const el = document.getElementById("state");
+    el.textContent = next;
+    el.classList.toggle("thinking", next !== "idle");
+  };
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    const rect = canvas.getBoundingClientRect();
+    W = rect.width; H = rect.height;
+    canvas.width = W * DPR; canvas.height = H * DPR;
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    CX = W / 2; CY = W < 860 ? 70 + (H - 70) * 0.42 : H * 0.43;
+    R = Math.min(W * (W < 860 ? 0.34 : 0.21), H * 0.29);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  let rotY = 0, rotX = -0.32, last = performance.now();
+
+  function frame(now) {
+    const dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+    energy += (energyTarget - energy) * Math.min(dt * 3, 1);
+    rotY += dt * (0.12 + energy * 0.5) * (reduceMotion ? 0 : 1);
+    const t = now / 1000;
+
+    ctx.globalCompositeOperation = "source-over";
+    ctx.clearRect(0, 0, W, H);
+
+    // Faint backing disc, offset like a lens.
+    const disc = ctx.createRadialGradient(CX - R * 0.25, CY - R * 0.2, R * 0.2, CX, CY, R * 1.45);
+    disc.addColorStop(0, "rgba(90,45,10,0.22)");
+    disc.addColorStop(0.7, "rgba(40,18,4,0.18)");
+    disc.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = disc;
+    ctx.beginPath(); ctx.arc(CX, CY, R * 1.45, 0, Math.PI * 2); ctx.fill();
+
+    ctx.globalCompositeOperation = "lighter";
+
+    // Outer ring arcs and ticks.
+    const ringRot = -rotY * 0.6;
+    for (const arc of arcs) {
+      ctx.strokeStyle = `rgba(255,170,60,${0.22 + energy * 0.25})`;
+      ctx.lineWidth = arc.w;
+      ctx.beginPath();
+      ctx.arc(CX, CY, R * arc.r, arc.start + ringRot, arc.start + arc.len + ringRot);
+      ctx.stroke();
+      for (let a = arc.start; a < arc.start + arc.len; a += 0.045) {
+        const ang = a + ringRot, r1 = R * (arc.r + 0.02), r2 = R * (arc.r + 0.05);
+        ctx.strokeStyle = "rgba(255,170,60,0.18)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(CX + Math.cos(ang) * r1, CY + Math.sin(ang) * r1);
+        ctx.lineTo(CX + Math.cos(ang) * r2, CY + Math.sin(ang) * r2);
+        ctx.stroke();
+      }
+    }
+
+    // Particle sphere.
+    const cy = Math.cos(rotY), sy = Math.sin(rotY), cx = Math.cos(rotX), sx = Math.sin(rotX);
+    const breathe = 1 + Math.sin(t * (1.2 + energy * 3)) * 0.015 * (0.5 + energy);
+    const persp = 2.6;
+    for (const p of parts) {
+      let x = p.x * cy - p.z * sy, z = p.x * sy + p.z * cy, y = p.y;
+      const y2 = y * cx - z * sx; z = y * sx + z * cx; y = y2;
+      const k = persp / (persp - z);
+      const px = CX + x * R * k * breathe, py = CY + y * R * k * breathe;
+      const depth = (z + 1.1) / 2.2;
+      const flick = 0.75 + 0.25 * Math.sin(t * 3 + p.flicker);
+      // Rim brightening: an outer-shell particle seen edge-on (z near 0) is brightest, so the sphere
+      // reads as a glowing ring with a darker interior.
+      const rim = p.outer ? 0.25 + 1.9 * Math.pow(1 - Math.min(1, Math.abs(z)), 2.2) : 0.22;
+      const alpha = Math.max(0, Math.min(1, (0.2 + depth * 0.8) * rim * p.b * flick * (0.65 + energy * 0.6)));
+      if (alpha < 0.02) continue;
+      if (p.streak) {
+        // Streak along the ring: perpendicular to the line from the center.
+        const dx = px - CX, dy = py - CY, d = Math.hypot(dx, dy) || 1;
+        const len = p.streak * R * k;
+        ctx.strokeStyle = `rgba(255,${160 + depth * 80 | 0},${60 + depth * 50 | 0},${Math.min(1, alpha * 1.3)})`;
+        ctx.lineWidth = p.size > 1.5 ? 1.6 : 1;
+        ctx.beginPath();
+        ctx.moveTo(px - (-dy / d) * len * 0.5, py - (dx / d) * len * 0.5);
+        ctx.lineTo(px + (-dy / d) * len * 0.5, py + (dx / d) * len * 0.5);
+        ctx.stroke();
+      } else {
+        const s = p.size * k * (1.6 + depth) * 2.8;
+        ctx.globalAlpha = alpha;
+        ctx.drawImage(sprite, px - s / 2, py - s / 2, s, s);
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // Core: swirling ellipses and a hot center.
+    ctx.save();
+    ctx.translate(CX, CY);
+    for (let i = 0; i < 5; i++) {
+      ctx.rotate(t * (0.25 + i * 0.07) * (i % 2 ? -1 : 1) * (0.5 + energy));
+      ctx.strokeStyle = `rgba(255,${190 + i * 10},${90 + i * 15},${0.12 + energy * 0.22})`;
+      ctx.lineWidth = 1.2 + energy;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, R * (0.32 - i * 0.03), R * (0.12 + i * 0.02), i * 0.6, 0, Math.PI * 1.6);
+      ctx.stroke();
+    }
+    ctx.restore();
+    const core = ctx.createRadialGradient(CX, CY, 0, CX, CY, R * (0.32 + energy * 0.12));
+    core.addColorStop(0, `rgba(255,240,200,${0.55 + energy * 0.4})`);
+    core.addColorStop(0.3, `rgba(255,180,70,${0.25 + energy * 0.25})`);
+    core.addColorStop(1, "rgba(255,120,20,0)");
+    ctx.fillStyle = core;
+    ctx.beginPath(); ctx.arc(CX, CY, R * 0.5, 0, Math.PI * 2); ctx.fill();
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // Clock.
+  const clock = document.getElementById("clock");
+  const tick = () => { clock.textContent = new Date().toLocaleTimeString("en-GB"); };
+  tick(); setInterval(tick, 1000);
+
+  // Data from the Brain API. The token lives in this browser only.
+  const TOKEN_KEY = "jarvis-token";
+  const gate = document.getElementById("gate");
+  const getToken = () => { try { return localStorage.getItem(TOKEN_KEY) || ""; } catch { return ""; } };
+  const setToken = (v) => { try { localStorage.setItem(TOKEN_KEY, v); } catch {} };
+  let greeted = false;
+
+  async function api(path) {
+    const response = await fetch(path, { headers: { Authorization: "Bearer " + getToken() } });
+    if (response.status === 401) { gate.classList.add("open"); throw new Error("unauthorized"); }
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    return response.json();
+  }
+
+  function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+  function row(label, value, dot) {
+    const r = el("div", "row");
+    const k = el("span", "k");
+    if (dot !== undefined) k.appendChild(el("span", dot ? "dot" : "dot warn"));
+    k.appendChild(document.createTextNode(label));
+    r.append(k, el("span", "v", value));
+    return r;
+  }
+
+  function renderStatus(s) {
+    document.getElementById("checks").replaceChildren(...s.checks.map(c => row(c.name, c.value, c.ok)));
+    const rows = [];
+    const run = s.last_run;
+    if (!run) rows.push(row("Last run", "none yet", false));
+    else if (!run.finished) rows.push(row("Last run", "cut off · " + run.started.replace(/:\d\d\.\d+$/, ""), false));
+    else {
+      rows.push(row("Last run", run.started.replace(/:\d\d\.\d+$/, "") + (run.ok ? " · ok" : " · failed"), run.ok));
+      if (run.boards_scanned !== null) rows.push(row("Boards", `${run.boards_scanned} / ${run.boards_failed} failed`));
+      if (run.jobs_sent !== null) rows.push(row("Sent to Telegram", String(run.jobs_sent)));
+    }
+    if (s.open_jobs !== null) rows.push(row("Open jobs", s.open_jobs.toLocaleString("en-US")));
+    document.getElementById("jobfinder").replaceChildren(...rows);
+
+    const order = { active: 0, planned: 1, done: 2 };
+    const phases = [...s.phases].sort((a, b) => order[a.state] - order[b.state]).slice(0, 6);
+    document.getElementById("roadmap").replaceChildren(...(phases.length ? phases.map(p => {
+      const r = row(`Phase ${p.id} · ${p.name}`, p.state);
+      r.classList.add("phase-" + p.state);
+      r.querySelector(".k").style.unicodeBidi = "plaintext";
+      return r;
+    }) : [el("div", "empty", "Set ROADMAP_PATH in .env to show the roadmap.")]));
+    document.getElementById("updated").textContent =
+      new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  }
+
+  function renderInbox(items) {
+    const box = document.getElementById("inbox");
+    document.getElementById("inbox-count").textContent = items.length ? items.length + " WAITING" : "";
+    if (!items.length) { box.replaceChildren(el("div", "empty", "Nothing waiting.")); return; }
+    box.replaceChildren(...items.map(it => {
+      const item = el("div", "item");
+      item.append(el("div", "t", it.title), el("div", "s", `${it.company} · ${it.location} · ${it.points} pts`));
+      const actions = el("div", "actions");
+      const open = el("a", "btn", "OPEN");
+      if (/^https?:\/\//.test(it.url)) open.href = it.url;
+      open.target = "_blank"; open.rel = "noopener noreferrer";
+      actions.appendChild(open);
+      item.appendChild(actions);
+      return item;
+    }));
+  }
+
+  async function refresh() {
+    try {
+      const [s, items] = await Promise.all([api("/api/status"), api("/api/inbox")]);
+      renderStatus(s); renderInbox(items);
+      if (!greeted) {
+        greeted = true;
+        const hour = new Date().getHours();
+        const part = hour < 5 ? "Good night" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+        const down = s.checks.filter(c => !c.ok).map(c => c.name);
+        const health = down.length ? `${down.join(", ")}: needs attention.` : "All systems are running.";
+        const run = s.last_run && !s.last_run.finished ? " The last daily run was cut off before it finished." : "";
+        const waiting = items.length ? ` ${items.length} matches are waiting in the inbox.` : "";
+        say("ai", `${part}. ${health}${run}${waiting}`);
+      }
+    } catch (err) {
+      if (err.message !== "unauthorized") document.getElementById("updated").textContent = "OFFLINE";
+    }
+  }
+
+  document.getElementById("gate-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const value = document.getElementById("gate-token").value.trim();
+    if (!value) return;
+    setToken(value);
+    gate.classList.remove("open");
+    refresh();
+  });
+
+  // Command bar: answers come in the next step (Phase N3); for now it says so.
+  const log = document.getElementById("log");
+  const input = document.getElementById("input");
+  function say(cls, text) {
+    const div = document.createElement("div");
+    div.className = "msg " + cls;
+    div.textContent = text;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+  document.getElementById("command").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    say("me", text);
+    window.jarvisState("thinking");
+    setTimeout(() => {
+      window.jarvisState("speaking");
+      say("ai", "I can't answer questions yet: the agent behind this box is the next step.");
+      setTimeout(() => window.jarvisState("idle"), 1600);
+    }, 1400);
+  });
+
+  if (!getToken()) gate.classList.add("open");
+  else refresh();
+  setInterval(() => { if (getToken()) refresh(); }, 60000);
+})();
+</script>
+</body>
+</html>
