@@ -11,13 +11,16 @@ The Jarvis assistant. Plan and phases: Obsidian vault `02_Projects/Jarvis/Jarvis
 
 ## Ask Jarvis
 - Each request runs `claude -p` (the installed Claude Code CLI) on the subscription, through `CLAUDE_CODE_OAUTH_TOKEN` in `.env` from `claude setup-token`. Chosen over the Agent SDK because the SDK's docs direct third-party products to API keys.
-- The agent is read-only (`--tools Read,Grep,Glob`, `--permission-mode dontAsk`). It works from the vault (`VAULT_DIR`, else the folder above `ROADMAP_PATH` that holds `CLAUDE_INDEX.md`), with the code projects added.
+- It works from the vault (`VAULT_DIR`, else the folder above `ROADMAP_PATH` that holds `CLAUDE_INDEX.md`), with the code projects added. It writes only in the vault's memory folder `02_Projects/Jarvis/Memory/`: `--tools Read,Grep,Glob,Edit,Write`, one allow rule `Edit(02_Projects/Jarvis/Memory/**)`, and `--permission-mode dontAsk` denies every other edit (tested live: a write outside is blocked by the permission layer, not only by the prompt). Without a vault it is read-only.
+- Memory: `Jarvis Memory.md` in that folder is a short index put in front of the first request of each chat (`with_memory`); longer material goes in topic notes there.
+- `claude.exe` is called directly, not npm's `claude.cmd` shim, so cmd.exe never parses the arguments.
+- `scripts/brain.ps1` keeps the Brain running (restarts every 30 s, log in `data/brain.log`); `scripts/register_task.ps1` registers it as the `Jarvis Brain` logon task.
 - Each conversation is one Claude Code session: `--session-id` on the first turn, `--resume` after. A Haiku call picks haiku / sonnet / opus per request; `/haiku`, `/sonnet`, `/opus` at the start choose by hand. Any other leading `/` is refused, so requests cannot run Claude Code commands.
-- The request goes in on stdin: `claude` is a `.cmd` on Windows, and cmd.exe would interpret quotes and `&` on its command line. The fixed arguments (the system prompt too) must hold none of `" & | < > ^ % !`; a test checks it.
+- The request goes in on stdin. The fixed arguments (the system prompt too) still hold none of `" & | < > ^ % !`, for the case where only the `.cmd` shim is found; a test checks it.
 
 ## Where it stands (23.11.2026)
-- Done: Brain with status, inbox (answers write back to job-finder) and Ask Jarvis with chats, vault context and model routing; tested live.
-- Next: start the Brain at logon (Task Scheduler); queue requests while the desktop is off (N6).
+- Done: Brain with status, inbox (answers write back to job-finder) and Ask Jarvis with chats, vault context, model routing and vault memory; auto-start at logon; all tested live.
+- Next: queue requests while the desktop is off (N6).
 
 ## Hard rules
 - Listen on the Tailscale address only; every `/api` route needs the bearer token. Never add an unauthenticated data route.

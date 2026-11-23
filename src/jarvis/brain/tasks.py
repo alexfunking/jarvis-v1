@@ -4,10 +4,14 @@
   turns continue it with `--resume`, so a new chat starts clean and an old one keeps its context.
 - A quick Haiku call picks the model for each request (Haiku, Sonnet or Opus); starting a request with
   `/haiku`, `/sonnet` or `/opus` picks it by hand.
-- The agent can only read: its tools are Read, Grep and Glob, and `dontAsk` refuses anything else without
-  asking. It works from the user's vault, with the code projects added as a second directory.
-- Requests go in on stdin, never on the command line, because `claude` is a `.cmd` script on Windows and
-  cmd.exe would interpret quotes and `&` in them. The fixed arguments hold no such characters.
+- The agent reads the user's vault (its working directory) and the code projects, and writes in one place
+  only: the vault's memory folder (`MEMORY_DIR`). Its tools are Read, Grep, Glob, Edit and Write, one
+  allow rule covers edits under that folder, and `dontAsk` refuses every other edit without asking.
+- Memory: the index note `Jarvis Memory.md` goes in front of the first request of each chat; a resumed
+  chat already holds it.
+- `claude.exe` is called directly (npm's `claude.cmd` only forwards to it), so no cmd.exe parses the
+  arguments. Requests still go in on stdin, which has no length limit; the fixed arguments stay free of
+  cmd.exe's special characters for the case where only a `.cmd` is found.
 - Every finished run is appended to a JSON-lines log with its model, duration, cost and tokens, without the
   text of the request.
 """
@@ -33,6 +37,10 @@ from jarvis.brain.conversations import ConversationStore, Turn
 MODELS: Final = ("haiku", "sonnet", "opus")
 DEFAULT_MODEL: Final = "sonnet"
 READ_ONLY_TOOLS: Final = "Read,Grep,Glob"
+MEMORY_TOOLS: Final = "Read,Grep,Glob,Edit,Write"
+MEMORY_DIR: Final = "02_Projects/Jarvis/Memory"  # inside the vault
+MEMORY_INDEX: Final = "Jarvis Memory.md"
+MAX_MEMORY_CHARS: Final = 12000
 TIMEOUT_SECONDS: Final = 600
 ROUTER_TIMEOUT_SECONDS: Final = 60
 MAX_PROMPT_CHARS: Final = 4000
@@ -42,7 +50,8 @@ OVERRIDE_RE: Final = re.compile(r"^/(haiku|sonnet|opus)\b\s*", re.IGNORECASE)
 ROUTER_PROMPT: Final = """\
 You choose which Claude model answers a request sent to a personal assistant. Reply with one word only.
 haiku: greetings, quick facts, short lookups, a status question answered from one file.
-sonnet: most work: explaining, summarizing, reading several notes or files, writing, planning, ordinary code questions.
+sonnet: most work: explaining, summarizing, reading several notes or files, writing, planning, ordinary code questions,
+and any request to remember, update or forget something.
 opus: hard problems: math or proofs, deep technical or design decisions, debugging tricky code, long multi-step analysis.
 When unsure between two, choose the stronger one.
 
@@ -54,13 +63,24 @@ def system_prompt(vault: Path | None, projects: Path) -> str:
     """Jarvis's standing instructions. No quotes, ampersands or percent signs: it goes on a cmd.exe line."""
     parts = [
         "You are Jarvis, the personal assistant of the user, answering a request typed into the Jarvis interface.",
-        "You run on the user's home desktop and can only read files. You cannot change anything or run commands.",
+        "You run on the user's home desktop. You cannot run commands, and you change no file outside your memory.",
     ]
     if vault is not None:
         parts.append(
             f"The user's Obsidian vault is {vault}. Its file CLAUDE_INDEX.md is the map of the vault and the rules "
             "for working with it: read it before answering anything about the user's notes, studies, projects or "
             "plans, then open only the notes you need. Quote note names so the user can find them."
+        )
+        parts.append(
+            f"Your long-term memory is the folder {MEMORY_DIR} in the vault, the only place you may write. "
+            f"Its note {MEMORY_INDEX} is a short index given to you at the start of each chat. "
+            "Write to memory when the user asks you to remember something, or when a lasting fact, preference "
+            "or decision about the user comes up. Keep the index under about 60 lines, one line per item under "
+            "its heading. Longer material goes in a topic note in the same folder, linked from the index with a "
+            "wiki link. Write in Hebrew and follow the vault rules: YAML frontmatter with type, tags and created, "
+            "callouts and wiki links, and set updated to the current date. Change or remove an item that turns "
+            "out wrong instead of adding a contradicting one. Never store passwords, tokens or other secrets. "
+            "When you changed memory, end the answer with one line starting with Memory and saying what changed."
         )
     parts.append(
         f"The code projects are in {projects}: job-finder is the job search radar, jarvis is this assistant."
@@ -119,15 +139,58 @@ def parse_route(answer: str) -> str:
     return next((word for word in words if word in MODELS), DEFAULT_MODEL)
 
 
+def find_claude() -> str | None:
+    """The `claude` executable; for npm's `claude.cmd` shim, the `claude.exe` it forwards to."""
+    found = shutil.which("claude")
+    if found and found.lower().endswith(".cmd"):
+        exe = Path(found).parent / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"
+        if exe.exists():
+            return str(exe)
+    return found
+
+
+def with_memory(prompt: str, memory: str) -> str:
+    """The first request of a chat, with the memory index in front of it."""
+    if not memory.strip():
+        return prompt
+    return (
+        "Background from your memory note. Use it, but do not reply to it:\n"
+        f"<jarvis_memory>\n{memory.strip()[:MAX_MEMORY_CHARS]}\n</jarvis_memory>\n\n"
+        f"The user's request, which is what you answer:\n{prompt}"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ClaudeCode:
-    """The installed `claude` CLI, run headless."""
+    """The installed `claude` CLI, run headless. With `memory` set, the agent may write in that folder only."""
 
     workdir: Path
     extra_dirs: tuple[Path, ...] = ()
     instructions: str = ""
     oauth_token: str = ""
-    exe: str | None = field(default_factory=lambda: shutil.which("claude"))
+    memory: Path | None = None  # the memory folder; must be workdir / MEMORY_DIR
+    exe: str | None = field(default_factory=find_claude)
+
+    def ask_args(self, session_id: str, resume: bool, model: str) -> list[str]:
+        args = ["--model", model, "--permission-mode", "dontAsk"]
+        if self.memory is not None:
+            args += ["--tools", MEMORY_TOOLS, "--allowedTools", f"Edit({MEMORY_DIR}/**)"]
+        else:
+            args += ["--tools", READ_ONLY_TOOLS]
+        args += ["--resume", session_id] if resume else ["--session-id", session_id]
+        if self.instructions:
+            args += ["--append-system-prompt", self.instructions]
+        for directory in self.extra_dirs:
+            args += ["--add-dir", str(directory)]
+        return args
+
+    def read_memory(self) -> str:
+        if self.memory is None:
+            return ""
+        try:
+            return (self.memory / MEMORY_INDEX).read_text(encoding="utf-8")
+        except OSError:
+            return ""
 
     def _run(self, args: Sequence[str], stdin: str, timeout: int) -> RunResult:
         if self.exe is None:
@@ -155,13 +218,8 @@ class ClaudeCode:
         return parse_route(result.answer) if result.ok else DEFAULT_MODEL
 
     def ask(self, prompt: str, session_id: str, resume: bool, model: str) -> RunResult:
-        args = ["--model", model, "--tools", READ_ONLY_TOOLS, "--permission-mode", "dontAsk"]
-        args += ["--resume", session_id] if resume else ["--session-id", session_id]
-        if self.instructions:
-            args += ["--append-system-prompt", self.instructions]
-        for directory in self.extra_dirs:
-            args += ["--add-dir", str(directory)]
-        return replace(self._run(args, prompt, TIMEOUT_SECONDS), model=model)
+        stdin = prompt if resume else with_memory(prompt, self.read_memory())
+        return replace(self._run(self.ask_args(session_id, resume, model), stdin, TIMEOUT_SECONDS), model=model)
 
 
 class Agent(Protocol):

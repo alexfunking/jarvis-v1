@@ -162,6 +162,7 @@ def _task_queue(settings: Settings) -> tasks.TaskQueue:
         extra_dirs=(projects,) if vault else (),
         instructions=tasks.system_prompt(vault, projects),
         oauth_token=settings.claude_oauth_token,
+        memory=vault / tasks.MEMORY_DIR if vault else None,
     )
     data = ROOT / "data"
     return tasks.TaskQueue(agent, ConversationStore(data / "conversations.json"), log_path=data / "runs.jsonl")

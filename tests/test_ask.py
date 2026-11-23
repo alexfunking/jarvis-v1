@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -110,8 +111,39 @@ def test_log_has_the_model_and_no_prompt_text(tmp_path: Path) -> None:
 
 def test_system_prompt_is_safe_on_a_cmd_line() -> None:
     text = tasks.system_prompt(Path(r"C:\Vault"), Path(r"C:\Projects"))
-    assert "CLAUDE_INDEX.md" in text
+    assert "CLAUDE_INDEX.md" in text and tasks.MEMORY_DIR in text
     assert not set(text) & set('"&|<>^%!')
+
+
+def test_memory_goes_in_front_of_the_first_request_only(tmp_path: Path) -> None:
+    memory = tmp_path / tasks.MEMORY_DIR
+    memory.mkdir(parents=True)
+    (memory / tasks.MEMORY_INDEX).write_text("## עליי\n- סטודנט", encoding="utf-8")
+    seen: list[str] = []
+
+    @dataclass(frozen=True)
+    class Recording(tasks.ClaudeCode):
+        def _run(self, args: Sequence[str], stdin: str, timeout: int) -> tasks.RunResult:
+            seen.append(stdin)
+            return tasks.RunResult("ok", True)
+
+    agent = Recording(workdir=tmp_path, memory=memory, exe="claude.exe")
+    agent.ask("first", "s1", False, "sonnet")
+    agent.ask("again", "s1", True, "sonnet")
+    assert "<jarvis_memory>\n## עליי" in seen[0] and seen[0].endswith("which is what you answer:\nfirst")
+    assert seen[1] == "again"
+    assert tasks.with_memory("q", "  ") == "q"
+
+
+def test_only_the_memory_folder_is_writable() -> None:
+    with_memory = tasks.ClaudeCode(workdir=Path("v"), memory=Path("v") / tasks.MEMORY_DIR, exe="c").ask_args(
+        "s", False, "opus")
+    assert with_memory[with_memory.index("--tools") + 1] == tasks.MEMORY_TOOLS
+    assert with_memory[with_memory.index("--allowedTools") + 1] == "Edit(02_Projects/Jarvis/Memory/**)"
+    assert with_memory[with_memory.index("--permission-mode") + 1] == "dontAsk"
+    read_only = tasks.ClaudeCode(workdir=Path("v"), exe="c").ask_args("s", True, "haiku")
+    assert read_only[read_only.index("--tools") + 1] == tasks.READ_ONLY_TOOLS
+    assert "--allowedTools" not in read_only and read_only[read_only.index("--resume") + 1] == "s"
 
 
 def test_ask_and_conversation_endpoints() -> None:
