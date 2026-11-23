@@ -13,6 +13,8 @@ The Jarvis assistant. Plan and phases: Obsidian vault `02_Projects/Jarvis/Jarvis
 - Each request runs `claude -p` (the installed Claude Code CLI) on the subscription, through `CLAUDE_CODE_OAUTH_TOKEN` in `.env` from `claude setup-token`. Chosen over the Agent SDK because the SDK's docs direct third-party products to API keys.
 - It works from the vault (`VAULT_DIR`, else the folder above `ROADMAP_PATH` that holds `CLAUDE_INDEX.md`), with the code projects added. It writes only in the vault's memory folder `02_Projects/Jarvis/Memory/`: `--tools Read,Grep,Glob,Edit,Write`, one allow rule `Edit(02_Projects/Jarvis/Memory/**)`, and `--permission-mode dontAsk` denies every other edit (tested live: a write outside is blocked by the permission layer, not only by the prompt). Without a vault it is read-only.
 - Memory: `Jarvis Memory.md` in that folder is a short index put in front of the first request of each chat (`with_memory`); longer material goes in topic notes there.
+- Memory review (desktop only): a thread runs `TaskQueue.review_idle` every 5 minutes. Chats idle 30 minutes with turns not yet reviewed (`Conversation.reviewed_turns`) go to one Sonnet run with the memory tools and `--no-session-persistence`, which writes what is lasting. Imported backup chats are reviewed the same way. The Systems panel shows the last review; `runs.jsonl` logs it as `kind: memory-review`, without chat text.
+- Past chats: every chat is also `data/chats/<date> <id>.md` (ignored), added with `--add-dir` and named in the system prompt, so Jarvis can Grep earlier conversations.
 - `claude.exe` is called directly, not npm's `claude.cmd` shim, so cmd.exe never parses the arguments.
 - `scripts/brain.ps1` keeps the Brain running (restarts every 30 s, log in `data/brain.log`); `scripts/register_task.ps1` registers it as the `Jarvis Brain` logon task.
 - Each conversation is one Claude Code session: `--session-id` on the first turn, `--resume` after. A Haiku call picks haiku / sonnet / opus per request; `/haiku`, `/sonnet`, `/opus`, `/local` at the start choose by hand. Any other leading `/` is refused, so requests cannot run Claude Code commands.
@@ -23,10 +25,10 @@ The Jarvis assistant. Plan and phases: Obsidian vault `02_Projects/Jarvis/Jarvis
 ## Backup (N6)
 - The desktop is preferred. While it is off, the laptop runs the same server with `JARVIS_ROLE=backup` on 127.0.0.1: Claude only, memory read but not written (`memory_writable=False`), no job-finder data. Setup: `scripts/setup_backup.ps1`.
 - The page asks its own server `/api/role`; on the backup it tries `JARVIS_PRIMARY_URL` first (3 s), rechecks every 30 s and never switches under a running request. The desktop allows that origin through CORS (`JARVIS_CORS_ORIGINS`, default `http://127.0.0.1:<port>`); the token is still required.
-- When the desktop is back, the page posts the backup's chats to `POST /api/conversations/import` (desktop only), deletes them on the backup, and the desktop runs one Sonnet task that reviews them for memory. Only the desktop writes memory.
+- When the desktop is back, the page posts the backup's chats to `POST /api/conversations/import` (desktop only) and deletes them on the backup; the memory review picks them up. Only the desktop writes memory.
 
 ## Where it stands (23.11.2026)
-- Done: Brain with status, inbox (answers write back to job-finder) and Ask Jarvis with chats, vault context, model routing and vault memory; auto-start at logon; local model and the laptop backup (N6), tested live with two Brains on one machine.
+- Done: Brain with status, inbox (answers write back to job-finder) and Ask Jarvis with chats, vault context, model routing and vault memory; auto-start at logon; local model and the laptop backup (N6), tested live with two Brains on one machine; idle chats reviewed for memory and past chats searchable, tested live in a temp copy of the memory folder.
 - Next: run `scripts/setup_backup.ps1` on the Zenbook and test with the desktop really off.
 
 ## Hard rules

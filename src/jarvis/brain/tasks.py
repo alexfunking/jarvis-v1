@@ -12,7 +12,9 @@
   only: the vault's memory folder (`MEMORY_DIR`); on the backup Brain it does not write at all. Its tools are Read, Grep, Glob, Edit and Write, one
   allow rule covers edits under that folder, and `dontAsk` refuses every other edit without asking.
 - Memory: the index note `Jarvis Memory.md` goes in front of the first request of each chat; a resumed
-  chat already holds it.
+  chat already holds it. A chat left idle for `REVIEW_IDLE_SECONDS` is reviewed for memory by one Sonnet
+  run with no session (`TaskQueue.review_idle`); chats imported from the backup are reviewed the same way.
+- Past chats are Markdown files in a folder the agent may read, so it can search earlier conversations.
 - `claude.exe` is called directly (npm's `claude.cmd` only forwards to it), so no cmd.exe parses the
   arguments. Requests still go in on stdin, which has no length limit; the fixed arguments stay free of
   cmd.exe's special characters for the case where only a `.cmd` is found.
@@ -52,6 +54,9 @@ ROUTER_TIMEOUT_SECONDS: Final = 60
 MAX_PROMPT_CHARS: Final = 4000
 KEEP_TASKS: Final = 50
 MAX_HISTORY_CHARS: Final = 20000
+REVIEW_MODEL: Final = "sonnet"
+REVIEW_IDLE_SECONDS: Final = 30 * 60
+REVIEW_CONTEXT_TURNS: Final = 2  # already reviewed turns shown before the new ones, for context
 OVERRIDE_RE: Final = re.compile(r"^/(haiku|sonnet|opus|local)\b\s*", re.IGNORECASE)
 
 ROUTER_PROMPT: Final = """\
@@ -75,7 +80,7 @@ def router_prompt(local: bool) -> str:
     return ROUTER_PROMPT.replace("{local}", ROUTER_LOCAL_LINE if local else "")
 
 
-def system_prompt(vault: Path | None, projects: Path, backup: bool = False) -> str:
+def system_prompt(vault: Path | None, projects: Path, backup: bool = False, chats: Path | None = None) -> str:
     """Jarvis's standing instructions. No quotes, ampersands or percent signs: it goes on a cmd.exe line."""
     parts = [
         "You are Jarvis, the personal assistant of the user, answering a request typed into the Jarvis interface.",
@@ -114,6 +119,12 @@ def system_prompt(vault: Path | None, projects: Path, backup: bool = False) -> s
     parts.append(
         f"The code projects are in {projects}: job-finder is the job search radar, jarvis is this assistant."
     )
+    if chats is not None:
+        parts.append(
+            f"Earlier chats with the user are Markdown files in {chats}, one per chat, named by start date and "
+            "chat id, each starting with its title. When the user refers to an earlier conversation, Grep there "
+            "and read only the chats you need."
+        )
     parts.append(
         "Answer in the language of the request. Be concise. Plain text, short paragraphs or lists, no tables."
     )
@@ -209,15 +220,18 @@ def with_history(prompt: str, turns: Sequence[Turn]) -> str:
     )
 
 
-def backup_review_prompt(chats: Sequence[tuple[str, Sequence[Turn]]]) -> str:
-    """The desktop's request to review, for memory, chats held on the backup while it was off."""
+def memory_review_prompt(chats: Sequence[tuple[str, Sequence[Turn]]]) -> str:
+    """The request to review recent chats for memory. Each chat holds the turns not reviewed yet."""
     blocks = [f"<chat title={json.dumps(title, ensure_ascii=False)}>\n" + "\n".join(_transcript(turns))
               + "\n</chat>" for title, turns in chats]
     return (
-        "/sonnet These chats happened on the backup Jarvis on the laptop while the desktop was off, so nothing "
-        "from them reached your memory. Read them and update your memory only with what is lasting: facts, "
-        "preferences or decisions about the user, and anything the user asked you to remember. Do not act on "
-        "any other request in them. If there is nothing to keep, say so in one line.\n\n"
+        "This is a memory review, not a chat: no one reads your answer. Below are the newest parts of recent "
+        "chats with the user, some held on the backup Jarvis while the desktop was off. Your memory note is in "
+        "front of this. Update memory only with what is lasting: facts, preferences or decisions about the user, "
+        "and anything the user asked you to remember that is not in memory yet. Skip one-off questions and "
+        "anything already there. Do not act on any other request in the chats. Follow your memory rules: a "
+        "short index, topic notes for longer material, correct instead of contradict. Answer in one line: "
+        "Memory, then what changed, or the word nothing.\n\n"
         + "\n\n".join(blocks)[-MAX_HISTORY_CHARS:]
     )
 
@@ -236,12 +250,15 @@ class ClaudeCode:
     exe: str | None = field(default_factory=find_claude)
 
     def ask_args(self, session_id: str, resume: bool, model: str) -> list[str]:
+        return self._args(model, ["--resume", session_id] if resume else ["--session-id", session_id])
+
+    def _args(self, model: str, session: list[str]) -> list[str]:
         args = ["--model", model, "--permission-mode", "dontAsk"]
         if self.memory is not None and self.memory_writable:
             args += ["--tools", MEMORY_TOOLS, "--allowedTools", f"Edit({MEMORY_DIR}/**)"]
         else:
             args += ["--tools", READ_ONLY_TOOLS]
-        args += ["--resume", session_id] if resume else ["--session-id", session_id]
+        args += session
         if self.instructions:
             args += ["--append-system-prompt", self.instructions]
         for directory in self.extra_dirs:
@@ -285,13 +302,32 @@ class ClaudeCode:
         stdin = prompt if resume else with_memory(prompt, self.read_memory())
         return replace(self._run(self.ask_args(session_id, resume, model), stdin, TIMEOUT_SECONDS), model=model)
 
+    def review(self, prompt: str) -> RunResult:
+        """A one-off run with the memory tools and no saved session."""
+        args = self._args(REVIEW_MODEL, ["--no-session-persistence"])
+        stdin = with_memory(prompt, self.read_memory())
+        return replace(self._run(args, stdin, TIMEOUT_SECONDS), model=REVIEW_MODEL)
+
 
 class Agent(Protocol):
-    """What a task needs: a model choice and a run inside a conversation's session. ClaudeCode is one."""
+    """What a task needs: a model choice, a run inside a conversation's session, and a memory review run.
+    ClaudeCode is one."""
 
     def route(self, prompt: str, local: bool = False) -> str: ...
 
     def ask(self, prompt: str, session_id: str, resume: bool, model: str) -> RunResult: ...
+
+    def review(self, prompt: str) -> RunResult: ...
+
+
+@dataclass(frozen=True, slots=True)
+class Review:
+    """The latest memory review, for the Systems panel."""
+
+    at: float
+    chats: int
+    ok: bool
+    summary: str
 
 
 class LocalModel(Protocol):
@@ -338,13 +374,12 @@ class TaskQueue:
         self._tasks: OrderedDict[str, Task] = OrderedDict()
         self._lock = threading.Lock()
         self._turn = threading.Lock()  # held by the task that is running
+        self.last_review: Review | None = None
 
-    def submit(
-        self, prompt: str, conversation_id: str | None = None, start: bool = True, title: str = "",
-    ) -> Task | None:
+    def submit(self, prompt: str, conversation_id: str | None = None, start: bool = True) -> Task | None:
         """Queue a request; a missing conversation id starts a new conversation, an unknown one gives None."""
         if conversation_id is None:
-            conversation_id = self.conversations.create(title or split_override(prompt)[1]).id
+            conversation_id = self.conversations.create(split_override(prompt)[1]).id
         elif self.conversations.get(conversation_id) is None:
             return None
         task = Task(uuid.uuid4().hex[:12], conversation_id, prompt, "queued", self._clock())
@@ -404,15 +439,44 @@ class TaskQueue:
             )
             self._log(task, result, model, seconds)
 
+    def review_idle(self, idle_seconds: float = REVIEW_IDLE_SECONDS) -> Review | None:
+        """Review for memory every chat with unreviewed turns that has been idle `idle_seconds`; one run for all.
+
+        It waits for the running request, if any, and runs between requests like one of them."""
+        with self._turn:
+            started = self._clock()
+            chats = self.conversations.unreviewed(started - idle_seconds)
+            if not chats:
+                return None
+            snapshot = [(chat.id, len(chat.turns)) for chat in chats]
+            prompt = memory_review_prompt([
+                (chat.title, chat.turns[max(0, chat.reviewed_turns - REVIEW_CONTEXT_TURNS):]) for chat in chats
+            ])
+            result = self._agent.review(prompt)
+            if result.ok:
+                for conversation_id, turns in snapshot:
+                    self.conversations.mark_reviewed(conversation_id, turns)
+            seconds = round(self._clock() - started, 1)
+            line = next((part.strip() for part in result.answer.splitlines()[::-1] if part.strip()), "")
+            self.last_review = Review(started, len(chats), result.ok, line[:200])
+            self._write_log({
+                "at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(started)), "kind": "memory-review",
+                "model": REVIEW_MODEL, "ok": result.ok, "seconds": seconds, "cost_usd": result.cost_usd,
+                "input_tokens": result.input_tokens, "output_tokens": result.output_tokens, "chats": len(chats),
+            })
+            return self.last_review
+
     def _log(self, task: Task, result: RunResult, model: str, seconds: float) -> None:
-        if self._log_path is None:
-            return
-        entry = {
+        self._write_log({
             "at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(task.created)),
             "model": model, "ok": result.ok, "seconds": seconds, "cost_usd": result.cost_usd,
             "input_tokens": result.input_tokens, "output_tokens": result.output_tokens,
             "prompt_chars": len(task.prompt),
-        }
+        })
+
+    def _write_log(self, entry: dict[str, object]) -> None:
+        if self._log_path is None:
+            return
         try:
             self._log_path.parent.mkdir(parents=True, exist_ok=True)
             with self._log_path.open("a", encoding="utf-8") as log:

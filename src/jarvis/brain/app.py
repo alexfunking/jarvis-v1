@@ -7,13 +7,18 @@ it asks for the token once and keeps it in the browser.
 The same server runs as the backup on the laptop (JARVIS_ROLE=backup) on 127.0.0.1, for when the desktop
 is off: Claude only, no job-finder data, memory read but never written. The page served there tries the
 desktop first (CORS lets it), and when the desktop is back it moves the backup's chats there
-(`/api/conversations/import`), where one Sonnet run reviews them for memory.
+(`/api/conversations/import`).
+
+On the desktop a background thread reviews idle chats for memory every few minutes (`review_idle`); the
+imported chats are reviewed the same way.
 """
 
 from __future__ import annotations
 
 import secrets
 import sys
+import threading
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Annotated
@@ -41,7 +46,18 @@ class AnswerRequest(BaseModel):
     answer: str
 
 
-def live_status(settings: Settings) -> StatusSource:
+REVIEW_EVERY_SECONDS = 5 * 60
+
+
+def review_check(review: tasks.Review | None) -> status.Check:
+    if review is None:
+        return status.Check("Memory review", True, "none yet")
+    when = time.strftime("%H:%M", time.localtime(review.at))
+    plural = "s" if review.chats != 1 else ""
+    return status.Check("Memory review", review.ok, f"{when} · {review.chats} chat{plural}")
+
+
+def live_status(settings: Settings, queue: tasks.TaskQueue | None = None) -> StatusSource:
     if settings.backup:
         return lambda: status.Status(
             checks=[status.Check("Laptop (backup Brain)", True, "online"), status.tailscale_check()],
@@ -56,6 +72,7 @@ def live_status(settings: Settings) -> StatusSource:
                 status.tailscale_check(),
                 status.service_check("SSH", "sshd"),
                 status.ollama_check(),
+                *([review_check(queue.last_review)] if queue is not None else []),
             ],
             last_run=status.last_daily_run(log),
             open_jobs=_open_jobs(settings.jobfinder_dir),
@@ -110,7 +127,6 @@ def create_app(
     role: str = "desktop",
     primary_url: str = "",
     cors_origins: Sequence[str] = (),
-    review_imports: bool = True,
 ) -> FastAPI:
     app = FastAPI(title="Jarvis Brain", docs_url=None, redoc_url=None, openapi_url=None)
     if cors_origins:
@@ -177,21 +193,15 @@ def create_app(
 
     @app.post("/api/conversations/import", dependencies=[Depends(require_token)])
     def import_conversations(request: ImportRequest) -> dict[str, object]:
-        """Chats from the backup Brain, added as new chats; then one run reviews them for memory."""
+        """Chats from the backup Brain, added as new chats; the memory review picks them up like any idle chat."""
         if role != "desktop":
             raise HTTPException(status_code=404, detail="only the desktop Brain takes imported chats")
-        imported: list[tuple[str, tuple[Turn, ...]]] = []
         ids = []
         for chat in request.chats:
             turns = tuple(Turn(**turn.model_dump()) for turn in chat.messages)
-            if not turns:
-                continue
-            ids.append(task_queue.conversations.add_imported(chat.title, chat.created, turns).id)
-            imported.append((chat.title, turns))
-        review = None
-        if imported and review_imports:
-            review = task_queue.submit(tasks.backup_review_prompt(imported), title="Memory review: chats from the backup")
-        return {"imported": ids, "review": review.to_json() if review else None}
+            if turns:
+                ids.append(task_queue.conversations.add_imported(chat.title, chat.created, turns).id)
+        return {"imported": ids}
 
     @app.get("/api/conversations/{conversation_id}", dependencies=[Depends(require_token)])
     def get_conversation(conversation_id: str) -> dict[str, object]:
@@ -221,18 +231,29 @@ def _task_queue(settings: Settings) -> tasks.TaskQueue:
     projects = ROOT.parent
     vault = settings.vault_dir
     memory = vault / tasks.MEMORY_DIR if vault else None
+    data = settings.data_dir
+    chats = data / "chats"
     agent = tasks.ClaudeCode(
         workdir=vault or projects,
-        extra_dirs=(projects,) if vault else (),
-        instructions=tasks.system_prompt(vault, projects, backup=settings.backup),
+        extra_dirs=(projects, chats) if vault else (chats,),
+        instructions=tasks.system_prompt(vault, projects, backup=settings.backup, chats=chats),
         oauth_token=settings.claude_oauth_token,
         memory=memory,
         memory_writable=not settings.backup,
     )
     local = OllamaChat(settings.local_model, memory) if settings.local_model else None
-    data = settings.data_dir
-    return tasks.TaskQueue(agent, ConversationStore(data / "conversations.json"), log_path=data / "runs.jsonl",
-                           local=local)
+    chats.mkdir(parents=True, exist_ok=True)
+    return tasks.TaskQueue(agent, ConversationStore(data / "conversations.json", transcripts=chats),
+                           log_path=data / "runs.jsonl", local=local)
+
+
+def _review_forever(queue: tasks.TaskQueue) -> None:
+    while True:
+        time.sleep(REVIEW_EVERY_SECONDS)
+        try:
+            queue.review_idle()
+        except Exception as exc:  # the thread must outlive one bad review
+            print(f"memory review failed: {exc}", file=sys.stderr)
 
 
 def main() -> int:
@@ -243,16 +264,18 @@ def main() -> int:
     except ConfigError as exc:
         print(exc, file=sys.stderr)
         return 2
+    queue = _task_queue(settings)
+    if not settings.backup and settings.vault_dir is not None:
+        threading.Thread(target=_review_forever, args=(queue,), daemon=True).start()
     app = create_app(
         settings.token,
-        live_status(settings),
+        live_status(settings, queue),
         (lambda: []) if settings.backup else lambda: inbox.job_matches(settings.jobfinder_dir),
         (lambda key, name: False) if settings.backup else lambda key, name: inbox.answer(settings.jobfinder_dir, key, name),
-        _task_queue(settings),
+        queue,
         role=settings.role,
         primary_url=settings.primary_url,
         cors_origins=settings.cors_origins,
-        review_imports=settings.vault_dir is not None,
     )
     print(f"Jarvis Brain ({settings.role}) on http://{settings.host}:{settings.port}/")
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="warning")

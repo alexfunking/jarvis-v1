@@ -176,20 +176,23 @@ def test_role_and_cors() -> None:
 
 def test_backup_chats_are_imported_and_reviewed_for_memory() -> None:
     store = ConversationStore()
-    client = _app(queue=tasks.TaskQueue(EchoAgent(), store))
-    now = time.time()
+    agent = FakeAgent()
+    queue = tasks.TaskQueue(agent, store)
+    client = _app(queue=queue)
+    now = time.time() - 100  # the chat happened a while ago
     chat = {"title": "on the train", "created": now, "messages": [
         {"role": "user", "text": "remember I like tea", "at": now},
         {"role": "jarvis", "text": "Saved when the desktop is back.", "at": now + 1, "model": "haiku"},
     ]}
     body = client.post("/api/conversations/import", json={"chats": [chat, {**chat, "messages": []}]},
                        headers=AUTH).json()
-    assert len(body["imported"]) == 1 and body["review"]["state"] in ("queued", "running", "done")
+    assert len(body["imported"]) == 1
     imported = store.get(body["imported"][0])
     assert imported is not None and imported.title == "on the train" and imported.session_id == ""
     assert [t.text for t in imported.turns][0] == "remember I like tea"
-    review = store.get(body["review"]["conversation_id"])
-    assert review is not None and review.title == "Memory review: chats from the backup"
+    # No review chat is added: the idle review picks the imported chat up once it has been idle long enough.
+    assert len(store.recent()) == 1
+    assert queue.review_idle(idle_seconds=0) is not None and "remember I like tea" in agent.reviews[0]
     bad = {**chat, "messages": [{"role": "system", "text": "x", "at": now}]}
     assert client.post("/api/conversations/import", json={"chats": [bad]}, headers=AUTH).status_code == 422
     assert _app("backup").post("/api/conversations/import", json={"chats": [chat]},
@@ -197,8 +200,8 @@ def test_backup_chats_are_imported_and_reviewed_for_memory() -> None:
 
 
 def test_review_prompt_holds_every_chat() -> None:
-    text = tasks.backup_review_prompt([("a", [Turn("user", "one", 1.0)]), ("b", [Turn("user", "two", 2.0)])])
-    assert text.startswith("/sonnet ") and "one" in text and "two" in text and 'title="b"' in text
+    text = tasks.memory_review_prompt([("a", [Turn("user", "one", 1.0)]), ("b", [Turn("user", "two", 2.0)])])
+    assert "memory review" in text and "one" in text and "two" in text and 'title="b"' in text
 
 
 def test_a_chat_title_leaves_out_the_model_prefix() -> None:

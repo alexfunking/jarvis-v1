@@ -130,6 +130,9 @@ class EchoAgent:
     def ask(self, prompt: str, session_id: str, resume: bool, model: str) -> tasks.RunResult:
         return tasks.RunResult(f"echo: {prompt}", ok=True, model=model)
 
+    def review(self, prompt: str) -> tasks.RunResult:
+        return tasks.RunResult("Memory: nothing", ok=True, model="sonnet")
+
 
 def test_answer_is_passed_on_and_checked() -> None:
     saved: list[tuple[str, str]] = []

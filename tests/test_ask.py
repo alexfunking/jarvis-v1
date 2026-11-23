@@ -22,6 +22,8 @@ class FakeAgent:
     answer: tasks.RunResult = field(default_factory=lambda: tasks.RunResult("an answer", True, 0.02, 10, 3))
     routes: list[str] = field(default_factory=list)
     asks: list[tuple[str, str, bool, str]] = field(default_factory=list)
+    reviews: list[str] = field(default_factory=list)
+    review_answer: tasks.RunResult = field(default_factory=lambda: tasks.RunResult("Memory: nothing", True))
 
     def route(self, prompt: str, local: bool = False) -> str:
         self.routes.append(prompt)
@@ -30,6 +32,10 @@ class FakeAgent:
     def ask(self, prompt: str, session_id: str, resume: bool, model: str) -> tasks.RunResult:
         self.asks.append((prompt, session_id, resume, model))
         return self.answer
+
+    def review(self, prompt: str) -> tasks.RunResult:
+        self.reviews.append(prompt)
+        return self.review_answer
 
 
 def run(queue: tasks.TaskQueue, prompt: str, conversation_id: str | None = None) -> tasks.Task:
