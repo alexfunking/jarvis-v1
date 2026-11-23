@@ -35,6 +35,8 @@ class Settings:
     port: int
     jobfinder_dir: Path
     roadmap_path: Path | None
+    claude_oauth_token: str = ""  # from `claude setup-token`; empty means the CLI's own login
+    vault_dir: Path | None = None  # the Obsidian vault Jarvis reads; the folder that holds CLAUDE_INDEX.md
 
     @classmethod
     def load(cls, env_file: Path, environ: Mapping[str, str] = os.environ) -> Settings:
@@ -53,10 +55,19 @@ class Settings:
         base = env_file.parent
         jobfinder_dir = Path(get("JOBFINDER_DIR") or "../job-finder")
         roadmap = get("ROADMAP_PATH")
+        vault = get("VAULT_DIR")
+        vault_dir = Path(vault).expanduser() if vault else _vault_above(Path(roadmap)) if roadmap else None
         return cls(
             token=token,
             host=host,
             port=int(port_text),
             jobfinder_dir=jobfinder_dir if jobfinder_dir.is_absolute() else (base / jobfinder_dir).resolve(),
             roadmap_path=Path(roadmap).expanduser() if roadmap else None,
+            claude_oauth_token=get("CLAUDE_CODE_OAUTH_TOKEN"),
+            vault_dir=vault_dir,
         )
+
+
+def _vault_above(note: Path) -> Path | None:
+    """The nearest folder above a vault note that holds CLAUDE_INDEX.md."""
+    return next((folder for folder in note.expanduser().parents if (folder / "CLAUDE_INDEX.md").exists()), None)

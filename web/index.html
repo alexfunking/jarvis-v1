@@ -4,6 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Jarvis</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#050302">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Jarvis">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <style>
@@ -117,7 +123,8 @@
   .msg { font-size: 17px; line-height: 1.35; unicode-bidi: plaintext; }
   .msg.me { color: var(--muted); }
   .msg.me::before { content: "› "; color: var(--amber-dim); }
-  .msg.ai { color: var(--amber-hot); text-shadow: 0 0 10px rgba(255, 173, 59, 0.35); }
+  .msg.ai { color: var(--amber-hot); text-shadow: 0 0 10px rgba(255, 173, 59, 0.35); white-space: pre-wrap; }
+  .msg.warn { color: var(--warn); text-shadow: none; }
 
   /* Command bar */
   .command {
@@ -138,6 +145,12 @@
   .command input:focus { border-color: var(--amber); box-shadow: 0 0 18px rgba(255, 173, 59, 0.25) inset; }
   .command input::placeholder { color: var(--amber-dim); }
   .send { height: 54px; padding: 0 22px; font-size: 15px; }
+  .chats { display: flex; gap: 6px; align-items: center; flex: none; }
+  .chats select { height: 54px; width: 220px; background: rgba(20, 10, 2, 0.8); border: 1px solid var(--line);
+                  color: var(--amber-hot); font-family: var(--mono); font-size: 13px; padding: 0 8px; outline: none;
+                  unicode-bidi: plaintext; }
+  .chats .btn { height: 54px; padding: 0 10px; }
+  .msg .meta { font-family: var(--mono); font-size: 12px; color: var(--amber-dim); margin-inline-start: 8px; }
 
   /* Frame decorations */
   .corner { position: absolute; width: 28px; height: 28px; border: 2px solid var(--amber); z-index: 2;
@@ -162,7 +175,12 @@
     .center { grid-row: 2; }
     .panel.left { grid-row: 3; }
     .panel.right { grid-row: 4; }
-    .command { grid-row: 5; }
+    .command { grid-row: 5; flex-wrap: wrap; gap: 8px; }
+    .command .ring { display: none; }
+    .chats { width: 100%; }
+    .chats select { flex: 1; width: auto; min-width: 0; height: 40px; }
+    .chats .btn { height: 40px; }
+    .hud { grid-template-rows: 56px 46vh auto auto auto; }
     #orb { position: absolute; height: calc(46vh + 70px); }
     .brand { font-size: 20px; letter-spacing: 0.3em; }
     .ticks { display: none; }
@@ -203,7 +221,12 @@
 
   <form class="command" id="command" autocomplete="off">
     <div class="ring" aria-hidden="true"></div>
-    <input id="input" placeholder="Ask Jarvis…" aria-label="Ask Jarvis" dir="auto">
+    <div class="chats">
+      <select id="chat" aria-label="Conversation"><option value="">New chat</option></select>
+      <button class="btn" type="button" id="new-chat" title="Start a new chat">NEW</button>
+      <button class="btn" type="button" id="delete-chat" title="Delete this chat">✕</button>
+    </div>
+    <input id="input" placeholder="Ask Jarvis…  (/opus, /sonnet or /haiku to choose the model)" aria-label="Ask Jarvis" dir="auto">
     <button class="btn send" type="submit">SEND</button>
   </form>
 </div>
@@ -211,7 +234,7 @@
 <div class="gate" id="gate">
   <form id="gate-form" autocomplete="off">
     <h3>ACCESS</h3>
-    <p>Paste the JARVIS_TOKEN from the desktop's .env. It stays in this browser only.</p>
+    <p>Paste the JARVIS_TOKEN from the desktop's .env. This device remembers it, so you are asked only once.</p>
     <input id="gate-token" type="password" aria-label="Access token">
     <button class="btn send" type="submit">UNLOCK</button>
   </form>
@@ -397,13 +420,17 @@
   const setToken = (v) => { try { localStorage.setItem(TOKEN_KEY, v); } catch {} };
   let greeted = false;
 
-  async function api(path, body) {
+  async function api(path, body, method) {
     const headers = { Authorization: "Bearer " + getToken() };
-    const init = body === undefined ? { headers } :
-      { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) };
+    const init = body === undefined ? { headers, method: method || "GET" } :
+      { method: method || "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) };
     const response = await fetch(path, init);
     if (response.status === 401) { gate.classList.add("open"); throw new Error("unauthorized"); }
-    if (!response.ok) throw new Error("HTTP " + response.status);
+    if (!response.ok) {
+      let detail = "HTTP " + response.status;
+      try { const data = await response.json(); if (typeof data.detail === "string") detail = data.detail; } catch {}
+      throw new Error(detail);
+    }
     return response.json();
   }
 
@@ -522,35 +549,109 @@
     if (!value) return;
     setToken(value);
     gate.classList.remove("open");
-    refresh();
+    start();
   });
 
-  // Command bar: answers come in the next step (Phase N3); for now it says so.
+  // Command bar: each request runs headless Claude Code on the desktop, inside the chosen conversation.
   const log = document.getElementById("log");
   const input = document.getElementById("input");
-  function say(cls, text) {
-    const div = document.createElement("div");
-    div.className = "msg " + cls;
-    div.textContent = text;
+  const chatSelect = document.getElementById("chat");
+  const CHAT_KEY = "jarvis-chat";
+  let currentChat = (() => { try { return localStorage.getItem(CHAT_KEY) || ""; } catch { return ""; } })();
+  const rememberChat = (id) => { currentChat = id; try { localStorage.setItem(CHAT_KEY, id); } catch {} };
+
+  function say(cls, text, meta) {
+    const div = el("div", "msg " + cls, text);
+    if (meta) div.appendChild(el("span", "meta", meta));
     log.appendChild(div);
     log.scrollTop = log.scrollHeight;
   }
+  const metaOf = (model, seconds) => [model, seconds !== null && seconds !== undefined ? seconds + "s" : ""].filter(Boolean).join(" · ");
+
+  async function loadChats() {
+    const chats = await api("/api/conversations");
+    const options = [el("option", "", "New chat")];
+    options[0].value = "";
+    for (const c of chats) {
+      const o = el("option", "", c.title);
+      o.value = c.id;
+      options.push(o);
+    }
+    chatSelect.replaceChildren(...options);
+    if (currentChat && !chats.some(c => c.id === currentChat)) rememberChat("");
+    chatSelect.value = currentChat;
+  }
+
+  async function openChat(id) {
+    rememberChat(id);
+    chatSelect.value = id;
+    log.replaceChildren();
+    if (!id) return;
+    try {
+      const chat = await api("/api/conversations/" + id);
+      for (const m of chat.messages) {
+        if (m.role === "user") say("me", m.text);
+        else say(m.ok ? "ai" : "ai warn", m.text, metaOf(m.model, m.seconds));
+      }
+    } catch (err) {
+      if (err.message !== "unauthorized") say("ai warn", `I couldn't load that chat (${err.message}).`);
+    }
+  }
+
+  let pending = 0;
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  async function ask(text) {
+    pending++;
+    window.jarvisState("thinking");
+    const chatAtStart = currentChat;
+    let reply, meta = "", failed = false;
+    try {
+      let task = await api("/api/tasks", { prompt: text, conversation_id: chatAtStart || null });
+      if (!chatAtStart) { rememberChat(task.conversation_id); loadChats().catch(() => {}); }
+      const deadline = Date.now() + 11 * 60 * 1000;
+      while ((task.state === "queued" || task.state === "running") && Date.now() < deadline) {
+        await sleep(1500);
+        task = await api("/api/tasks/" + task.id);
+      }
+      failed = task.state !== "done";
+      reply = task.state === "queued" || task.state === "running" ? "Still working after 11 minutes; I stopped waiting." : task.answer;
+      meta = metaOf(task.model, task.seconds);
+      if (currentChat !== task.conversation_id) reply = null;  // the user moved to another chat meanwhile
+    } catch (err) {
+      failed = true;
+      reply = err.message === "unauthorized" ? "Unlock first, then ask again." : `I couldn't do that (${err.message}).`;
+    }
+    pending--;
+    window.jarvisState("speaking");
+    if (reply !== null) say(failed ? "ai warn" : "ai", reply, meta);
+    setTimeout(() => window.jarvisState(pending ? "thinking" : "idle"), 1600);
+  }
+
   document.getElementById("command").addEventListener("submit", (e) => {
     e.preventDefault();
     const text = input.value.trim();
     if (!text) return;
     input.value = "";
     say("me", text);
-    window.jarvisState("thinking");
-    setTimeout(() => {
-      window.jarvisState("speaking");
-      say("ai", "I can't answer questions yet: the agent behind this box is the next step.");
-      setTimeout(() => window.jarvisState("idle"), 1600);
-    }, 1400);
+    ask(text);
+  });
+  chatSelect.addEventListener("change", () => openChat(chatSelect.value));
+  document.getElementById("new-chat").addEventListener("click", () => { openChat(""); input.focus(); });
+  document.getElementById("delete-chat").addEventListener("click", async () => {
+    if (!currentChat || !confirm("Delete this chat from Jarvis?")) return;
+    try { await api("/api/conversations/" + currentChat, undefined, "DELETE"); } catch {}
+    openChat("");
+    loadChats().catch(() => {});
   });
 
+  async function start() {
+    await refresh();
+    try { await loadChats(); if (currentChat) await openChat(currentChat); } catch {}
+  }
+
   if (!getToken()) gate.classList.add("open");
-  else refresh();
+  else start();
   setInterval(() => { if (getToken()) refresh(); }, 60000);
 })();
 </script>

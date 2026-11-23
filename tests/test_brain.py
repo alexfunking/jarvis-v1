@@ -7,9 +7,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from jarvis.brain import status
+from jarvis.brain import status, tasks
 from jarvis.brain.app import create_app
 from jarvis.brain.config import ConfigError, Settings
+from jarvis.brain.conversations import ConversationStore
 from jarvis.brain.inbox import InboxItem
 
 TOKEN = "t" * 32
@@ -115,8 +116,19 @@ def _client(saved: list[tuple[str, str]] | None = None) -> TestClient:
         lambda: status.Status([status.Check("Desktop (Brain)", True, "online")], None, 10),
         lambda: [item],
         sink,
+        tasks.TaskQueue(EchoAgent(), ConversationStore()),
     )
     return TestClient(app)
+
+
+class EchoAgent:
+    """Stands in for Claude Code: always routes to sonnet and echoes the request."""
+
+    def route(self, prompt: str) -> str:
+        return "sonnet"
+
+    def ask(self, prompt: str, session_id: str, resume: bool, model: str) -> tasks.RunResult:
+        return tasks.RunResult(f"echo: {prompt}", ok=True, model=model)
 
 
 def test_answer_is_passed_on_and_checked() -> None:
@@ -170,6 +182,9 @@ def test_api_with_token() -> None:
 
 
 def test_page_needs_no_token() -> None:
-    response = _client().get("/")
+    client = _client()
+    response = client.get("/")
     assert response.status_code == 200
     assert "Jarvis" in response.text
+    assert client.get("/manifest.webmanifest").json()["display"] == "standalone"
+    assert client.get("/icon.svg").headers["content-type"].startswith("image/svg+xml")
