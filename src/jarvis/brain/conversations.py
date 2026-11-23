@@ -1,5 +1,9 @@
 """Conversations with Jarvis: each one is its own Claude Code session, continued with `--resume`.
 
+`claude_turns` counts the turns that session has seen. Turns it missed (answered by the local model, or
+imported from the backup Brain, whose sessions stay on the laptop) are handed to Claude with the next
+request, so the conversation reads the same whichever model answered.
+
 The turns are also kept here, in one JSON file, so the interface can list the conversations and show
 their history after a restart. The file holds what the user asked, so it lives under the ignored
 `data/` folder and never in git.
@@ -36,6 +40,11 @@ class Conversation:
     updated: float
     session_id: str = ""
     turns: tuple[Turn, ...] = field(default_factory=tuple)
+    claude_turns: int = 0  # how many of `turns` the Claude Code session has seen
+
+    def unseen_by_claude(self) -> tuple[Turn, ...]:
+        """The turns the Claude session has not seen; all of them when there is no session yet."""
+        return self.turns[self.claude_turns:] if self.session_id else self.turns
 
     def summary(self) -> dict[str, object]:
         return {"id": self.id, "title": self.title, "updated": self.updated, "turns": len(self.turns)}
@@ -100,7 +109,10 @@ class ConversationStore:
             items = sorted(self._items.values(), key=lambda c: c.updated, reverse=True)
         return items[:limit]
 
-    def add_exchange(self, conversation_id: str, question: Turn, answer: Turn, session_id: str) -> None:
+    def add_exchange(
+        self, conversation_id: str, question: Turn, answer: Turn, session_id: str, claude_saw_all: bool = False,
+    ) -> None:
+        """Append a question and its answer; `claude_saw_all` marks every turn, these two too, as seen."""
         with self._lock:
             conversation = self._items.get(conversation_id)
             if conversation is None:
@@ -108,11 +120,22 @@ class ConversationStore:
             title = conversation.title
             if not conversation.turns and title == "New chat":
                 title = title_for(question.text)
+            turns = (*conversation.turns, question, answer)
             self._items[conversation_id] = replace(
                 conversation, title=title, updated=answer.at, session_id=session_id or conversation.session_id,
-                turns=(*conversation.turns, question, answer),
+                turns=turns, claude_turns=len(turns) if claude_saw_all else conversation.claude_turns,
             )
             self._save()
+
+    def add_imported(self, title: str, created: float, turns: tuple[Turn, ...]) -> Conversation:
+        """A conversation held elsewhere (the backup Brain), with no Claude session here."""
+        updated = max((turn.at for turn in turns), default=created)
+        conversation = Conversation(uuid.uuid4().hex[:12], title_for(title) or "Imported chat", created, updated,
+                                    turns=turns)
+        with self._lock:
+            self._items[conversation.id] = conversation
+            self._save()
+        return conversation
 
     def delete(self, conversation_id: str) -> bool:
         with self._lock:

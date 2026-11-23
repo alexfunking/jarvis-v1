@@ -15,12 +15,19 @@ The Jarvis assistant. Plan and phases: Obsidian vault `02_Projects/Jarvis/Jarvis
 - Memory: `Jarvis Memory.md` in that folder is a short index put in front of the first request of each chat (`with_memory`); longer material goes in topic notes there.
 - `claude.exe` is called directly, not npm's `claude.cmd` shim, so cmd.exe never parses the arguments.
 - `scripts/brain.ps1` keeps the Brain running (restarts every 30 s, log in `data/brain.log`); `scripts/register_task.ps1` registers it as the `Jarvis Brain` logon task.
-- Each conversation is one Claude Code session: `--session-id` on the first turn, `--resume` after. A Haiku call picks haiku / sonnet / opus per request; `/haiku`, `/sonnet`, `/opus` at the start choose by hand. Any other leading `/` is refused, so requests cannot run Claude Code commands.
+- Each conversation is one Claude Code session: `--session-id` on the first turn, `--resume` after. A Haiku call picks haiku / sonnet / opus per request; `/haiku`, `/sonnet`, `/opus`, `/local` at the start choose by hand. Any other leading `/` is refused, so requests cannot run Claude Code commands.
 - The request goes in on stdin. The fixed arguments (the system prompt too) still hold none of `" & | < > ^ % !`, for the case where only the `.cmd` shim is found; a test checks it.
+- Local model (`local.py`): the router may also answer `local` when Ollama has `JARVIS_LOCAL_MODEL` (default `gemma4:latest`); `/local` picks it by hand; without it `local` becomes haiku. It has no tools, gets the memory index and the last turns, and never touches the Claude session.
+- `Conversation.claude_turns` counts the turns the Claude session has seen; the rest (local answers, imported chats) go in front of the next Claude request (`with_history`).
+
+## Backup (N6)
+- The desktop is preferred. While it is off, the laptop runs the same server with `JARVIS_ROLE=backup` on 127.0.0.1: Claude only, memory read but not written (`memory_writable=False`), no job-finder data. Setup: `scripts/setup_backup.ps1`.
+- The page asks its own server `/api/role`; on the backup it tries `JARVIS_PRIMARY_URL` first (3 s), rechecks every 30 s and never switches under a running request. The desktop allows that origin through CORS (`JARVIS_CORS_ORIGINS`, default `http://127.0.0.1:<port>`); the token is still required.
+- When the desktop is back, the page posts the backup's chats to `POST /api/conversations/import` (desktop only), deletes them on the backup, and the desktop runs one Sonnet task that reviews them for memory. Only the desktop writes memory.
 
 ## Where it stands (23.11.2026)
-- Done: Brain with status, inbox (answers write back to job-finder) and Ask Jarvis with chats, vault context, model routing and vault memory; auto-start at logon; all tested live.
-- Next: queue requests while the desktop is off (N6).
+- Done: Brain with status, inbox (answers write back to job-finder) and Ask Jarvis with chats, vault context, model routing and vault memory; auto-start at logon; local model and the laptop backup (N6), tested live with two Brains on one machine.
+- Next: run `scripts/setup_backup.ps1` on the Zenbook and test with the desktop really off.
 
 ## Hard rules
 - Listen on the Tailscale address only; every `/api` route needs the bearer token. Never add an unauthenticated data route.

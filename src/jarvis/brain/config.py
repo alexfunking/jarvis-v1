@@ -37,6 +37,15 @@ class Settings:
     roadmap_path: Path | None
     claude_oauth_token: str = ""  # from `claude setup-token`; empty means the CLI's own login
     vault_dir: Path | None = None  # the Obsidian vault Jarvis reads; the folder that holds CLAUDE_INDEX.md
+    role: str = "desktop"  # "desktop" (the main Brain) or "backup" (the laptop, used while the desktop is off)
+    primary_url: str = ""  # on the backup: the desktop Brain the page tries first
+    cors_origins: tuple[str, ...] = ()  # on the desktop: pages allowed to call it from another origin
+    local_model: str = ""  # the Ollama model for light requests; empty turns the local model off
+    data_dir: Path = Path("data")  # chats and the run log
+
+    @property
+    def backup(self) -> bool:
+        return self.role == "backup"
 
     @classmethod
     def load(cls, env_file: Path, environ: Mapping[str, str] = os.environ) -> Settings:
@@ -57,6 +66,15 @@ class Settings:
         roadmap = get("ROADMAP_PATH")
         vault = get("VAULT_DIR")
         vault_dir = Path(vault).expanduser() if vault else _vault_above(Path(roadmap)) if roadmap else None
+        role = get("JARVIS_ROLE") or "desktop"
+        if role not in ("desktop", "backup"):
+            raise ConfigError(f"JARVIS_ROLE must be desktop or backup, got {role!r}")
+        primary_url = get("JARVIS_PRIMARY_URL").rstrip("/")
+        if role == "backup" and not primary_url.startswith("http://"):
+            raise ConfigError("JARVIS_PRIMARY_URL must be the desktop Brain, like http://100.x.y.z:8700")
+        # The backup page on the laptop (http://127.0.0.1:<port>) calls the desktop from its own origin.
+        origins = get("JARVIS_CORS_ORIGINS") or f"http://127.0.0.1:{port_text},http://localhost:{port_text}"
+        local_model = get("JARVIS_LOCAL_MODEL") or "gemma4:latest"
         return cls(
             token=token,
             host=host,
@@ -65,6 +83,12 @@ class Settings:
             roadmap_path=Path(roadmap).expanduser() if roadmap else None,
             claude_oauth_token=get("CLAUDE_CODE_OAUTH_TOKEN"),
             vault_dir=vault_dir,
+            role=role,
+            primary_url=primary_url if role == "backup" else "",
+            cors_origins=tuple(o.strip().rstrip("/") for o in origins.split(",") if o.strip()) if role == "desktop"
+            else (),
+            local_model="" if role == "backup" or local_model.lower() == "off" else local_model,
+            data_dir=(base / Path(get("JARVIS_DATA_DIR") or "data")).resolve(),
         )
 
 

@@ -67,6 +67,10 @@
   .state { font-family: var(--mono); font-size: 13px; padding: 4px 10px; border: 1px solid var(--line);
            color: var(--amber-hot); text-transform: uppercase; }
   .state.thinking { color: var(--bg); background: var(--amber); }
+  .node { font-family: var(--mono); font-size: 13px; padding: 4px 10px; border: 1px solid var(--line);
+          color: var(--amber-dim); text-transform: uppercase; }
+  .node:empty { display: none; }
+  .node.backup { color: var(--bg); background: var(--amber-dim); }
 
   /* Side panels */
   .panel {
@@ -197,6 +201,7 @@
   <header class="topbar">
     <div class="brand">JARVIS</div>
     <div class="bar"></div>
+    <div class="node" id="node" title="Which Brain answers"></div>
     <div class="state" id="state">idle</div>
     <div class="clock" id="clock">--:--:--</div>
   </header>
@@ -226,7 +231,7 @@
       <button class="btn" type="button" id="new-chat" title="Start a new chat">NEW</button>
       <button class="btn" type="button" id="delete-chat" title="Delete this chat">✕</button>
     </div>
-    <input id="input" placeholder="Ask Jarvis…  (/opus, /sonnet or /haiku to choose the model)" aria-label="Ask Jarvis" dir="auto">
+    <input id="input" placeholder="Ask Jarvis…  (/opus, /sonnet, /haiku or /local to choose the model)" aria-label="Ask Jarvis" dir="auto">
     <button class="btn send" type="submit">SEND</button>
   </form>
 </div>
@@ -420,11 +425,22 @@
   const setToken = (v) => { try { localStorage.setItem(TOKEN_KEY, v); } catch {} };
   let greeted = false;
 
-  async function api(path, body, method) {
+  // Which Brain answers. The page served by the backup on the laptop tries the desktop first ("primary")
+  // and uses its own server ("") while the desktop does not answer.
+  let role = null, primary = "", base = "", syncing = false;
+
+  async function api(path, body, method, at) {
+    const target = at === undefined ? base : at;
     const headers = { Authorization: "Bearer " + getToken() };
     const init = body === undefined ? { headers, method: method || "GET" } :
       { method: method || "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) };
-    const response = await fetch(path, init);
+    let response;
+    try {
+      response = await fetch(target + path, init);
+    } catch (err) {
+      if (target && target === primary) { chooseNode(); throw new Error("the desktop stopped answering; switching to the backup"); }
+      throw err;
+    }
     if (response.status === 401) { gate.classList.add("open"); throw new Error("unauthorized"); }
     if (!response.ok) {
       let detail = "HTTP " + response.status;
@@ -453,7 +469,8 @@
     document.getElementById("checks").replaceChildren(...s.checks.map(c => row(c.name, c.value, c.ok)));
     const rows = [];
     const run = s.last_run;
-    if (!run) rows.push(row("Last run", "none yet", false));
+    if (onBackup()) rows.push(row("Job data", "on the desktop"));
+    else if (!run) rows.push(row("Last run", "none yet", false));
     else if (!run.finished) rows.push(row("Last run", "cut off · " + run.started.replace(/:\d\d\.\d+$/, ""), false));
     else {
       rows.push(row("Last run", run.started.replace(/:\d\d\.\d+$/, "") + (run.ok ? " · ok" : " · failed"), run.ok));
@@ -485,7 +502,8 @@
   function setInboxCount() {
     const n = document.querySelectorAll("#inbox .item").length;
     document.getElementById("inbox-count").textContent = n ? n + " WAITING" : "";
-    if (!n) document.getElementById("inbox").replaceChildren(el("div", "empty", "Nothing waiting."));
+    if (!n) document.getElementById("inbox").replaceChildren(el("div", "empty",
+      onBackup() ? "The inbox lives on the desktop, which is off." : "Nothing waiting."));
   }
 
   async function answerJob(it, name, done, item) {
@@ -536,7 +554,8 @@
         const health = down.length ? `${down.join(", ")}: needs attention.` : "All systems are running.";
         const run = s.last_run && !s.last_run.finished ? " The last daily run was cut off before it finished." : "";
         const waiting = items.length ? ` ${items.length} matches are waiting in the inbox.` : "";
-        say("ai", `${part}. ${health}${run}${waiting}`);
+        const backup = onBackup() ? " The desktop is off, so the backup on this laptop answers: Claude only, no inbox." : "";
+        say("ai", `${part}. ${health}${run}${waiting}${backup}`);
       }
     } catch (err) {
       if (err.message !== "unauthorized") document.getElementById("updated").textContent = "OFFLINE";
@@ -645,7 +664,73 @@
     loadChats().catch(() => {});
   });
 
+  // Desktop or backup. Chats live on the Brain that answered them, so a switch reloads the chat list.
+  const onBackup = () => role === "backup" && base === "";
+  function setNode() {
+    const node = document.getElementById("node");
+    node.textContent = role === "backup" ? (base ? "DESKTOP" : "BACKUP · LAPTOP") : "";
+    node.classList.toggle("backup", onBackup());
+    node.title = onBackup() ? "The desktop is off: Claude only, no inbox, memory read-only" : "Which Brain answers";
+  }
+
+  async function desktopAnswers() {
+    const control = new AbortController();
+    const timer = setTimeout(() => control.abort(), 3000);
+    try {
+      const response = await fetch(primary + "/api/role",
+        { headers: { Authorization: "Bearer " + getToken() }, signal: control.signal });
+      return response.ok;
+    } catch { return false; } finally { clearTimeout(timer); }
+  }
+
+  let choosing = null;
+  function chooseNode() {
+    if (!choosing) choosing = pickNode().finally(() => { choosing = null; });
+    return choosing;
+  }
+  async function pickNode() {
+    if (role === null) {
+      try { const r = await api("/api/role", undefined, undefined, ""); role = r.role; primary = r.primary || ""; }
+      catch (err) { if (err.message === "unauthorized") return; role = "desktop"; }
+    }
+    if (role !== "backup" || !primary) { setNode(); return; }
+    if (pending) return;  // never switch under a running request
+    const before = base;
+    base = await desktopAnswers() ? primary : "";
+    setNode();
+    if (base) await moveBackupChats();
+    if (before !== base && greeted) {
+      say("ai", base ? "The desktop is back; Jarvis answers from it again."
+                     : "The desktop is off, so the backup on this laptop answers: Claude only, no inbox, and memory is saved when the desktop is back.");
+      rememberChat("");
+      log.replaceChildren();
+      refresh(); loadChats().catch(() => {});
+    }
+  }
+
+  // Chats held on the backup move to the desktop, which reviews them for memory.
+  async function moveBackupChats() {
+    if (syncing) return;
+    syncing = true;
+    try {
+      const list = await api("/api/conversations", undefined, undefined, "");
+      const chats = [];
+      for (const c of list) {
+        const full = await api("/api/conversations/" + c.id, undefined, undefined, "");
+        if (full.messages.length) chats.push({ id: c.id, title: c.title, created: full.messages[0].at, messages: full.messages });
+      }
+      if (!chats.length) return;
+      await api("/api/conversations/import", { chats: chats.map(({ id, ...chat }) => chat) }, undefined, primary);
+      for (const c of chats) await api("/api/conversations/" + c.id, undefined, "DELETE", "").catch(() => {});
+      say("ai", `Moved ${chats.length} chat${chats.length > 1 ? "s" : ""} from the backup to the desktop; Jarvis is reviewing them for memory.`);
+      loadChats().catch(() => {});
+    } catch (err) {
+      if (err.message !== "unauthorized") say("ai warn", `I couldn't move the backup's chats to the desktop yet (${err.message}).`);
+    } finally { syncing = false; }
+  }
+
   async function start() {
+    await chooseNode();
     await refresh();
     try { await loadChats(); if (currentChat) await openChat(currentChat); } catch {}
   }
@@ -653,6 +738,7 @@
   if (!getToken()) gate.classList.add("open");
   else start();
   setInterval(() => { if (getToken()) refresh(); }, 60000);
+  setInterval(() => { if (getToken() && role === "backup") chooseNode(); }, 30000);
 })();
 </script>
 </body>

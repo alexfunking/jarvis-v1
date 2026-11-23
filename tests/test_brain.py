@@ -124,7 +124,7 @@ def _client(saved: list[tuple[str, str]] | None = None) -> TestClient:
 class EchoAgent:
     """Stands in for Claude Code: always routes to sonnet and echoes the request."""
 
-    def route(self, prompt: str) -> str:
+    def route(self, prompt: str, local: bool = False) -> str:
         return "sonnet"
 
     def ask(self, prompt: str, session_id: str, resume: bool, model: str) -> tasks.RunResult:

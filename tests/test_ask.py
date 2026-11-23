@@ -23,7 +23,7 @@ class FakeAgent:
     routes: list[str] = field(default_factory=list)
     asks: list[tuple[str, str, bool, str]] = field(default_factory=list)
 
-    def route(self, prompt: str) -> str:
+    def route(self, prompt: str, local: bool = False) -> str:
         self.routes.append(prompt)
         return self.routed
 
