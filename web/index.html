@@ -229,6 +229,7 @@
     <div class="chats">
       <select id="chat" aria-label="Conversation"><option value="">New chat</option></select>
       <button class="btn" type="button" id="new-chat" title="Start a new chat">NEW</button>
+      <button class="btn" type="button" id="brief" title="Write today's brief of mail and calendar now">BRIEF</button>
       <button class="btn" type="button" id="delete-chat" title="Delete this chat">✕</button>
     </div>
     <input id="input" placeholder="Ask Jarvis…  (/opus, /sonnet, /haiku or /local to choose the model)" aria-label="Ask Jarvis" dir="auto">
@@ -657,6 +658,24 @@
   });
   chatSelect.addEventListener("change", () => openChat(chatSelect.value));
   document.getElementById("new-chat").addEventListener("click", () => { openChat(""); input.focus(); });
+  document.getElementById("brief").addEventListener("click", async (e) => {
+    const button = e.currentTarget;
+    button.disabled = true;
+    pending++;
+    window.jarvisState("thinking");
+    say("ai", "Writing today's brief from your mail and calendar…");
+    try {
+      const result = await api("/api/brief", {});
+      await loadChats();
+      await openChat(result.conversation_id);
+    } catch (err) {
+      if (err.message !== "unauthorized") say("ai warn", `I couldn't write the brief (${err.message}).`);
+    } finally {
+      pending--;
+      button.disabled = false;
+      window.jarvisState(pending ? "thinking" : "idle");
+    }
+  });
   document.getElementById("delete-chat").addEventListener("click", async () => {
     if (!currentChat || !confirm("Delete this chat from Jarvis?")) return;
     try { await api("/api/conversations/" + currentChat, undefined, "DELETE"); } catch {}

@@ -308,6 +308,11 @@ class ClaudeCode:
         stdin = with_memory(prompt, self.read_memory())
         return replace(self._run(args, stdin, TIMEOUT_SECONDS), model=REVIEW_MODEL)
 
+    def complete(self, prompt: str, model: str) -> RunResult:
+        """A one-off run with no tools at all and no saved session: the answer comes from the prompt only."""
+        args = ["--model", model, "--tools", "", "--no-session-persistence"]
+        return replace(self._run(args, prompt, TIMEOUT_SECONDS), model=model)
+
 
 class Agent(Protocol):
     """What a task needs: a model choice, a run inside a conversation's session, and a memory review run.
@@ -459,7 +464,7 @@ class TaskQueue:
             seconds = round(self._clock() - started, 1)
             line = next((part.strip() for part in result.answer.splitlines()[::-1] if part.strip()), "")
             self.last_review = Review(started, len(chats), result.ok, line[:200])
-            self._write_log({
+            self.write_log({
                 "at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(started)), "kind": "memory-review",
                 "model": REVIEW_MODEL, "ok": result.ok, "seconds": seconds, "cost_usd": result.cost_usd,
                 "input_tokens": result.input_tokens, "output_tokens": result.output_tokens, "chats": len(chats),
@@ -467,14 +472,14 @@ class TaskQueue:
             return self.last_review
 
     def _log(self, task: Task, result: RunResult, model: str, seconds: float) -> None:
-        self._write_log({
+        self.write_log({
             "at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(task.created)),
             "model": model, "ok": result.ok, "seconds": seconds, "cost_usd": result.cost_usd,
             "input_tokens": result.input_tokens, "output_tokens": result.output_tokens,
             "prompt_chars": len(task.prompt),
         })
 
-    def _write_log(self, entry: dict[str, object]) -> None:
+    def write_log(self, entry: dict[str, object]) -> None:
         if self._log_path is None:
             return
         try:

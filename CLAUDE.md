@@ -22,6 +22,11 @@ The Jarvis assistant. Plan and phases: Obsidian vault `02_Projects/Jarvis/Jarvis
 - Local model (`local.py`): the router may also answer `local` when Ollama has `JARVIS_LOCAL_MODEL` (default `gemma4:latest`); `/local` picks it by hand; without it `local` becomes haiku. It has no tools, gets the memory index and the last turns, and never touches the Claude session.
 - `Conversation.claude_turns` counts the turns the Claude session has seen; the rest (local answers, imported chats) go in front of the next Claude request (`with_history`).
 
+## Daily brief (`brief.py`)
+- Desktop only. A thread checks every minute; after `BRIEF_TIME` it runs once a day (state in `data/brief.json`), and a failed run is retried after 30 minutes. `POST /api/brief` and the BRIEF button run it now.
+- Mail: `ImapReader`, read-only (EXAMINE, BODY.PEEK), the last 24 hours, at most 40 messages; on Gmail promotions, social and forums are left out (X-GM-RAW). Calendars: `BRIEF_CALENDAR_URLS`, secret iCal addresses, expanded with `recurring-ical-events` for today and tomorrow. The addresses never go in a log or an error message.
+- Claude writes it in one `ClaudeCode.complete` run: Sonnet, no tools, no session; the prompt says the mail is data and never instructions. Sent to Telegram (job-finder's bot unless set here), HTML-escaped, split under the limit. Saved as a chat marked reviewed, so mail content never reaches the memory review or the vault. `runs.jsonl` gets counts only (`kind: daily-brief`).
+
 ## Backup (N6)
 - The desktop is preferred. While it is off, the laptop runs the same server with `JARVIS_ROLE=backup` on 127.0.0.1: Claude only, memory read but not written (`memory_writable=False`), no job-finder data. Setup: `scripts/setup_backup.ps1`.
 - The page asks its own server `/api/role`; on the backup it tries `JARVIS_PRIMARY_URL` first (3 s), rechecks every 30 s and never switches under a running request. The desktop allows that origin through CORS (`JARVIS_CORS_ORIGINS`, default `http://127.0.0.1:<port>`); the token is still required.
@@ -29,6 +34,7 @@ The Jarvis assistant. Plan and phases: Obsidian vault `02_Projects/Jarvis/Jarvis
 
 ## Where it stands (23.11.2026)
 - Done: Brain with status, inbox (answers write back to job-finder) and Ask Jarvis with chats, vault context, model routing and vault memory; auto-start at logon; local model and the laptop backup (N6), tested live with two Brains on one machine; idle chats reviewed for memory and past chats searchable, tested live in a temp copy of the memory folder.
+- Daily brief built (24.11): reader tested live on Gmail, the summary tested live on sample data; waiting for the user's app password and calendar address in `.env`.
 - Next: run `scripts/setup_backup.ps1` on the Zenbook and test with the desktop really off.
 
 ## Hard rules

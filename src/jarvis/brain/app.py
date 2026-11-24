@@ -10,7 +10,7 @@ desktop first (CORS lets it), and when the desktop is back it moves the backup's
 (`/api/conversations/import`).
 
 On the desktop a background thread reviews idle chats for memory every few minutes (`review_idle`); the
-imported chats are reviewed the same way.
+imported chats are reviewed the same way. Another sends the daily brief of mail and calendar (`brief.py`).
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import secrets
 import sys
 import threading
 import time
+from datetime import datetime
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Annotated
@@ -28,7 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from jarvis.brain import inbox, status, tasks
+from jarvis.brain import brief, inbox, status, tasks
 from jarvis.brain.config import ConfigError, Settings
 from jarvis.brain.conversations import ConversationStore, Turn
 from jarvis.brain.local import OllamaChat
@@ -47,6 +48,18 @@ class AnswerRequest(BaseModel):
 
 
 REVIEW_EVERY_SECONDS = 5 * 60
+BRIEF_CHECK_SECONDS = 60
+
+
+def brief_check(daily: brief.DailyBrief, at: str) -> status.Check:
+    if not daily.configured:
+        return status.Check("Daily brief", False, "not set up")
+    last = daily.last
+    if last is not None and not last.ok:
+        return status.Check("Daily brief", False, "failed; retrying")
+    sent = daily.last_day()
+    today = time.strftime("%Y-%m-%d")
+    return status.Check("Daily brief", True, "sent today" if sent == today else f"at {at}")
 
 
 def review_check(review: tasks.Review | None) -> status.Check:
@@ -57,7 +70,9 @@ def review_check(review: tasks.Review | None) -> status.Check:
     return status.Check("Memory review", review.ok, f"{when} · {review.chats} chat{plural}")
 
 
-def live_status(settings: Settings, queue: tasks.TaskQueue | None = None) -> StatusSource:
+def live_status(
+    settings: Settings, queue: tasks.TaskQueue | None = None, daily: brief.DailyBrief | None = None,
+) -> StatusSource:
     if settings.backup:
         return lambda: status.Status(
             checks=[status.Check("Laptop (backup Brain)", True, "online"), status.tailscale_check()],
@@ -73,6 +88,7 @@ def live_status(settings: Settings, queue: tasks.TaskQueue | None = None) -> Sta
                 status.service_check("SSH", "sshd"),
                 status.ollama_check(),
                 *([review_check(queue.last_review)] if queue is not None else []),
+                *([brief_check(daily, settings.brief_time)] if daily is not None else []),
             ],
             last_run=status.last_daily_run(log),
             open_jobs=_open_jobs(settings.jobfinder_dir),
@@ -127,6 +143,7 @@ def create_app(
     role: str = "desktop",
     primary_url: str = "",
     cors_origins: Sequence[str] = (),
+    daily: brief.DailyBrief | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Jarvis Brain", docs_url=None, redoc_url=None, openapi_url=None)
     if cors_origins:
@@ -155,6 +172,24 @@ def create_app(
     @app.get("/api/role", dependencies=[Depends(require_token)])
     def get_role() -> dict[str, str]:
         return {"role": role, "primary": primary_url}
+
+    brief_lock = threading.Lock()
+
+    @app.post("/api/brief", dependencies=[Depends(require_token)])
+    def post_brief() -> dict[str, object]:
+        """Write and send the daily brief now; it becomes a chat."""
+        if daily is None or not daily.configured:
+            raise HTTPException(status_code=409, detail="the daily brief is not set up: add mail or a calendar to .env")
+        if not brief_lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="a brief is being written already")
+        try:
+            result = daily.run(datetime.now().astimezone())
+        finally:
+            brief_lock.release()
+        return {"ok": result.ok, "conversation_id": result.conversation_id, "mails": result.mails,
+                "events": result.events}
+
+    app.state.brief_lock = brief_lock
 
     @app.get("/api/status", dependencies=[Depends(require_token)])
     def get_status() -> dict[str, object]:
@@ -226,7 +261,7 @@ def create_app(
     return app
 
 
-def _task_queue(settings: Settings) -> tasks.TaskQueue:
+def _task_queue(settings: Settings) -> tuple[tasks.TaskQueue, tasks.ClaudeCode]:
     """Claude Code works from the vault when there is one, with the code projects added beside it."""
     projects = ROOT.parent
     vault = settings.vault_dir
@@ -243,8 +278,49 @@ def _task_queue(settings: Settings) -> tasks.TaskQueue:
     )
     local = OllamaChat(settings.local_model, memory) if settings.local_model else None
     chats.mkdir(parents=True, exist_ok=True)
-    return tasks.TaskQueue(agent, ConversationStore(data / "conversations.json", transcripts=chats),
-                           log_path=data / "runs.jsonl", local=local)
+    queue = tasks.TaskQueue(agent, ConversationStore(data / "conversations.json", transcripts=chats),
+                            log_path=data / "runs.jsonl", local=local)
+    return queue, agent
+
+
+def _daily_brief(settings: Settings, queue: tasks.TaskQueue, agent: brief.Completer) -> brief.DailyBrief | None:
+    """The brief on the desktop, with whatever of mail, calendars and Telegram is set in .env."""
+    if settings.backup:
+        return None
+    mail = (brief.ImapReader(settings.brief_email_account, settings.brief_email_password, settings.brief_imap_host)
+            if settings.brief_email_account and settings.brief_email_password else None)
+    calendars = [lambda url=url: brief.fetch_text(url) for url in settings.brief_calendar_urls]
+    send = None
+    if settings.telegram_token and settings.telegram_chat_id:
+        from jobfinder.http import FetchError, UrllibPoster
+        from jobfinder.telegram import TelegramBot
+
+        bot = TelegramBot(settings.telegram_token, UrllibPoster(timeout_s=30.0))
+
+        def send_text(text: str) -> None:
+            try:
+                for chunk in brief.telegram_chunks(text):
+                    bot.send_message(settings.telegram_chat_id, chunk)
+            except FetchError as exc:
+                raise OSError(str(exc)) from exc
+
+        send = send_text
+    return brief.DailyBrief(agent, queue.conversations, mail, calendars, send,
+                            state_path=settings.data_dir / "brief.json", log=queue.write_log)
+
+
+def _brief_forever(daily: brief.DailyBrief, at: tuple[int, int], lock: threading.Lock) -> None:
+    while True:
+        time.sleep(BRIEF_CHECK_SECONDS)
+        now = datetime.now().astimezone()
+        if not daily.due(now, at) or not lock.acquire(blocking=False):
+            continue
+        try:
+            daily.run(now)
+        except Exception as exc:  # the thread must outlive one bad morning
+            print(f"daily brief failed: {exc}", file=sys.stderr)
+        finally:
+            lock.release()
 
 
 def _review_forever(queue: tasks.TaskQueue) -> None:
@@ -264,19 +340,24 @@ def main() -> int:
     except ConfigError as exc:
         print(exc, file=sys.stderr)
         return 2
-    queue = _task_queue(settings)
+    queue, agent = _task_queue(settings)
     if not settings.backup and settings.vault_dir is not None:
         threading.Thread(target=_review_forever, args=(queue,), daemon=True).start()
+    daily = _daily_brief(settings, queue, agent)
     app = create_app(
         settings.token,
-        live_status(settings, queue),
+        live_status(settings, queue, daily),
         (lambda: []) if settings.backup else lambda: inbox.job_matches(settings.jobfinder_dir),
         (lambda key, name: False) if settings.backup else lambda key, name: inbox.answer(settings.jobfinder_dir, key, name),
         queue,
         role=settings.role,
         primary_url=settings.primary_url,
         cors_origins=settings.cors_origins,
+        daily=daily,
     )
+    if daily is not None and daily.configured:
+        threading.Thread(target=_brief_forever, args=(daily, brief.parse_time(settings.brief_time),
+                                                       app.state.brief_lock), daemon=True).start()
     print(f"Jarvis Brain ({settings.role}) on http://{settings.host}:{settings.port}/")
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="warning")
     return 0

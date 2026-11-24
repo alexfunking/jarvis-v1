@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +43,15 @@ class Settings:
     cors_origins: tuple[str, ...] = ()  # on the desktop: pages allowed to call it from another origin
     local_model: str = ""  # the Ollama model for light requests; empty turns the local model off
     data_dir: Path = Path("data")  # chats and the run log
+    # The daily brief. Mail: an IMAP account with an app password, read only. Calendars: secret iCal addresses.
+    brief_email_account: str = ""
+    brief_email_password: str = ""
+    brief_imap_host: str = "imap.gmail.com"
+    brief_calendar_urls: tuple[str, ...] = ()
+    brief_time: str = "07:30"
+    # Telegram, for the brief; taken from job-finder's .env when not set here.
+    telegram_token: str = ""
+    telegram_chat_id: str = ""
 
     @property
     def backup(self) -> bool:
@@ -75,6 +85,11 @@ class Settings:
         # The backup page on the laptop (http://127.0.0.1:<port>) calls the desktop from its own origin.
         origins = get("JARVIS_CORS_ORIGINS") or f"http://127.0.0.1:{port_text},http://localhost:{port_text}"
         local_model = get("JARVIS_LOCAL_MODEL") or "gemma4:latest"
+        jobfinder_path = jobfinder_dir if jobfinder_dir.is_absolute() else (base / jobfinder_dir).resolve()
+        jobfinder_env = read_env_file(jobfinder_path / ".env")
+        brief_time = get("BRIEF_TIME") or "07:30"
+        if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", brief_time):
+            raise ConfigError(f"BRIEF_TIME must look like 07:30, got {brief_time!r}")
         return cls(
             token=token,
             host=host,
@@ -89,6 +104,13 @@ class Settings:
             else (),
             local_model="" if role == "backup" or local_model.lower() == "off" else local_model,
             data_dir=(base / Path(get("JARVIS_DATA_DIR") or "data")).resolve(),
+            brief_email_account=get("BRIEF_EMAIL_ACCOUNT"),
+            brief_email_password=get("BRIEF_EMAIL_APP_PASSWORD").replace(" ", ""),
+            brief_imap_host=get("BRIEF_IMAP_HOST") or "imap.gmail.com",
+            brief_calendar_urls=tuple(u.strip() for u in get("BRIEF_CALENDAR_URLS").split(",") if u.strip()),
+            brief_time=brief_time,
+            telegram_token=get("TELEGRAM_BOT_TOKEN") or jobfinder_env.get("TELEGRAM_BOT_TOKEN", ""),
+            telegram_chat_id=get("TELEGRAM_CHAT_ID") or jobfinder_env.get("TELEGRAM_CHAT_ID", ""),
         )
 
 
